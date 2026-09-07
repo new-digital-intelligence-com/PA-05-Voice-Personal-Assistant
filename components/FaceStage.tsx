@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { FaceStatus } from "./useSimliStream";
 
 type Props = {
@@ -10,10 +11,16 @@ type Props = {
 
 export default function FaceStage({ videoRef, audioRef, status }: Props) {
   const live = status === "live" || status === "speaking";
+  // Simli streams a fixed-resolution square. Stretching it past that is what makes her
+  // look soft, so the stage never grows beyond the frame's real pixels.
+  const [nativeHeight, setNativeHeight] = useState<number | null>(null);
 
   return (
     <div className="relative flex h-full w-full items-center justify-center">
-      <div className="relative aspect-[2/3] h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]">
+      <div
+        className="relative aspect-[2/3] h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]"
+        style={nativeHeight ? { maxHeight: `${nativeHeight}px` } : undefined}
+      >
         {/* The still portrait holds the frame until the live face takes over. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -28,6 +35,10 @@ export default function FaceStage({ videoRef, audioRef, status }: Props) {
           ref={videoRef}
           autoPlay
           playsInline
+          onLoadedMetadata={(e) => {
+            const el = e.currentTarget;
+            if (el.videoHeight) setNativeHeight(el.videoHeight);
+          }}
           className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-700 ${
             live ? "opacity-100" : "opacity-0"
           }`}

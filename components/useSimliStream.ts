@@ -98,7 +98,10 @@ export function useSimliStream(onSpeechEnd?: () => void) {
         video,
         audio,
         data.iceServers ?? null,
-        LogLevel.ERROR,
+        // Their client logs a red ERROR whenever a session closes ("failed to send
+        // final message"), which in development happens on every hot reload and React
+        // double-mount. We report real failures ourselves, so keep their noise quiet.
+        process.env.NEXT_PUBLIC_SIMLI_DEBUG === "1" ? LogLevel.DEBUG : LogLevel.CRITICAL,
         transport,
       );
 
