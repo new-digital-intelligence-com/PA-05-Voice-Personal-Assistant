@@ -13,7 +13,7 @@ const DEFAULT_FACE = path.join(process.cwd(), "public", "face.png");
 /** A copy of whatever portrait was uploaded, kept so the browser can display it. */
 const UPLOAD_FILE = path.join(process.cwd(), "data", "face-source");
 
-type FaceRecord = { url: string; mime?: string; at?: string };
+type FaceRecord = { url: string; mime?: string; at?: string; defaultFingerprint?: string };
 
 async function readRecord(): Promise<FaceRecord | null> {
   try {
@@ -78,19 +78,40 @@ export async function getFaceUrl(): Promise<string | null> {
   if (process.env.DID_SOURCE_URL) return process.env.DID_SOURCE_URL;
 
   const saved = await readRecord();
-  if (saved?.url) return saved.url;
+  if (!process.env.DID_API_KEY) return saved?.url ?? null;
 
-  if (!process.env.DID_API_KEY) return null;
+  let fingerprint: string | null = null;
+  let bytes: Buffer | null = null;
   try {
-    const bytes = await fs.readFile(DEFAULT_FACE);
-    // The default portrait is already served from /face.png, so no copy is needed.
-    return await uploadFace(new File([bytes], "face.png", { type: "image/png" }), false);
+    bytes = await fs.readFile(DEFAULT_FACE);
+    const stat = await fs.stat(DEFAULT_FACE);
+    fingerprint = `${stat.size}`;
   } catch {
-    return null;
+    /* no bundled portrait */
+  }
+
+  // A photo uploaded through the app always wins. Otherwise re-upload the bundled
+  // portrait whenever the file itself has changed, so swapping public/face.png in the
+  // repo is enough to change her face — no cache to clear by hand.
+  if (saved?.url && (saved.mime || saved.defaultFingerprint === fingerprint)) {
+    return saved.url;
+  }
+
+  if (!bytes) return saved?.url ?? null;
+  try {
+    // The default portrait is already served from /face.png, so no copy is needed.
+    const blob = new File([new Uint8Array(bytes)], "face.png", { type: "image/png" });
+    return await uploadFace(blob, false, fingerprint);
+  } catch {
+    return saved?.url ?? null;
   }
 }
 
-export async function uploadFace(file: File, keepCopy = true): Promise<string> {
+export async function uploadFace(
+  file: File,
+  keepCopy = true,
+  defaultFingerprint: string | null = null,
+): Promise<string> {
   const form = new FormData();
   form.append("image", file, file.name || "face.jpg");
   // D-ID answers with an s3:// URI. Their API accepts it as a source, but a browser
@@ -106,6 +127,7 @@ export async function uploadFace(file: File, keepCopy = true): Promise<string> {
     JSON.stringify({
       url: result.url,
       mime: keepCopy ? file.type || "image/png" : undefined,
+      defaultFingerprint: defaultFingerprint ?? undefined,
       at: new Date().toISOString(),
     }),
   );
