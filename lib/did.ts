@@ -162,20 +162,37 @@ export type StreamSession = {
 
 export async function createStream(sourceUrl: string): Promise<StreamSession> {
   // Streams default to a small, soft render — noticeably blurrier than the still
-  // portrait beside it. Ask for a taller output, and warm the stream so the first
-  // frame is ready before she is asked to say anything.
+  // portrait beside it — so ask for a taller output and a warmed first frame.
+  // Several of these settings are plan-gated ("user has no permission for ..."), and a
+  // rejected extra must never cost her the ability to speak: try the richest payload
+  // first, then progressively plainer ones.
   const resolution = Number(process.env.DID_OUTPUT_RESOLUTION ?? 1080);
-  return didFetch<StreamSession>(
-    "/talks/streams",
-    json({
-      source_url: sourceUrl,
-      output_resolution: resolution,
-      stream_warmup: true,
-      // Cap how long an abandoned stream keeps holding one of the account's
-      // concurrent sessions. Without this they linger for minutes.
-      session_timeout: Number(process.env.DID_SESSION_TIMEOUT ?? 180),
-    }),
-  );
+  const timeout = process.env.DID_SESSION_TIMEOUT ? Number(process.env.DID_SESSION_TIMEOUT) : null;
+
+  const attempts: Record<string, unknown>[] = [];
+  if (timeout) {
+    attempts.push({ output_resolution: resolution, stream_warmup: true, session_timeout: timeout });
+  }
+  attempts.push({ output_resolution: resolution, stream_warmup: true });
+  attempts.push({ output_resolution: resolution });
+  attempts.push({});
+
+  let lastError: unknown;
+  for (const extras of attempts) {
+    try {
+      return await didFetch<StreamSession>(
+        "/talks/streams",
+        json({ source_url: sourceUrl, ...extras }),
+      );
+    } catch (e) {
+      lastError = e;
+      const message = e instanceof Error ? e.message : "";
+      // Only a rejected *option* is worth retrying without it. Anything else — a bad
+      // key, no credits, the session limit — will fail the same way every time.
+      if (!/no permission|not allowed|invalid|unsupported/i.test(message)) throw e;
+    }
+  }
+  throw lastError;
 }
 
 export async function sendAnswer(id: string, sessionId: string, answer: RTCSessionDescriptionInit) {
