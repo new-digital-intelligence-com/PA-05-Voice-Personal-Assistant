@@ -15,8 +15,11 @@ export async function POST(request: Request) {
   }
 
   let text: string;
+  // "pcm" returns raw 16-bit 16kHz mono, which is what Simli's lip-sync consumes.
+  // Anything else returns mp3 for ordinary playback.
+  let format: string | undefined;
   try {
-    ({ text } = await request.json());
+    ({ text, format } = await request.json());
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -27,8 +30,11 @@ export async function POST(request: Request) {
   const voiceId = process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE;
   const modelId = process.env.ELEVENLABS_MODEL_ID || DEFAULT_MODEL;
 
+  const pcm = format === "pcm";
+  const outputFormat = pcm ? "pcm_16000" : "mp3_44100_128";
+
   const upstream = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=${outputFormat}`,
     {
       method: "POST",
       headers: { "xi-api-key": apiKey, "Content-Type": "application/json" },
@@ -49,6 +55,9 @@ export async function POST(request: Request) {
   }
 
   return new Response(upstream.body, {
-    headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" },
+    headers: {
+      "Content-Type": pcm ? "application/octet-stream" : "audio/mpeg",
+      "Cache-Control": "no-store",
+    },
   });
 }

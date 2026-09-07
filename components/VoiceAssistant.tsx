@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import FaceStage from "./FaceStage";
 import CardView from "./Cards";
-import { useDidStream } from "./useDidStream";
+import { useSimliStream } from "./useSimliStream";
 import type { Card } from "@/lib/cards";
 
 type Mode = "face" | "chat";
@@ -102,7 +102,7 @@ export default function VoiceAssistant() {
   );
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const prewarmRef = useRef<(() => void) | null>(null);
+  const interruptRef = useRef<(() => void) | null>(null);
   /** Set when the user (not the silence timer) ends the turn. */
   const stopRequestedRef = useRef(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -122,7 +122,7 @@ export default function VoiceAssistant() {
     if (latest.current.handsFree) latest.current.startListening();
   }, []);
 
-  const did = useDidStream(onSpeechEnd);
+  const face = useSimliStream(onSpeechEnd);
 
   const searchParams = useSearchParams();
   const googleStatus = searchParams.get("google");
@@ -284,9 +284,8 @@ export default function VoiceAssistant() {
     setListening(true);
     recognition.start();
 
-    // Open the video stream while the user is still talking, so her first sentence
-    // does not wait on a WebRTC handshake.
-    if (latest.current.mode === "face") prewarmRef.current?.();
+    // Talking over her makes no sense — stop her mid-sentence instead.
+    if (latest.current.mode === "face") interruptRef.current?.();
   }, []);
 
   const stopListening = useCallback(() => {
@@ -306,8 +305,8 @@ export default function VoiceAssistant() {
       setThinking(true);
       setError(null);
 
-      const face = latest.current.mode === "face" && !latest.current.muted;
-      if (face) did.beginTurn();
+      const speaks = latest.current.mode === "face" && !latest.current.muted;
+      if (speaks) face.beginTurn();
 
       let spoken = "";
       let buffer = "";
@@ -359,13 +358,13 @@ export default function VoiceAssistant() {
               paint();
               // Only the opening words are sent early, cut at a word boundary so she
               // starts talking about a second sooner. The rest follows as one piece.
-              if (face && !spoken && buffer.length >= FIRST_UTTERANCE) {
+              if (speaks && !spoken && buffer.length >= FIRST_UTTERANCE) {
                 const cut = buffer.lastIndexOf(" ");
                 if (cut >= FIRST_UTTERANCE - 4) {
                   const opening = buffer.slice(0, cut).trim();
                   buffer = buffer.slice(cut);
                   spoken += opening;
-                  void did.speak(opening);
+                  void face.speak(opening);
                 }
               }
             } else if (event.type === "cards") {
@@ -383,32 +382,32 @@ export default function VoiceAssistant() {
 
         setThinking(false);
 
-        if (face) {
+        if (speaks) {
           // The whole remainder in one go, so it plays as continuous speech.
           const rest = buffer.trim();
           if (rest) {
             spoken += rest;
-            void did.speak(rest);
+            void face.speak(rest);
           }
-          if (!spoken.trim() && full.trim()) void did.speak(full);
-          did.endTurn();
+          if (!spoken.trim() && full.trim()) void face.speak(full);
+          face.endTurn();
         } else {
           void speakInChat(full, onSpeechEnd);
         }
       } catch (e) {
         setThinking(false);
-        if (face) did.endTurn();
+        if (speaks) face.endTurn();
         setError(e instanceof Error ? e.message : "Something went wrong");
         setHandsFree(false);
         latest.current.handsFree = false;
       }
     },
-    [did, speakInChat, onSpeechEnd],
+    [face, speakInChat, onSpeechEnd],
   );
 
   useEffect(() => {
-    prewarmRef.current = did.prewarm;
-  }, [did.prewarm]);
+    interruptRef.current = face.interrupt;
+  }, [face.interrupt]);
 
   useEffect(() => {
     latest.current = {
@@ -423,7 +422,7 @@ export default function VoiceAssistant() {
 
   /* ----------------------------------------------------------------- ui */
 
-  const speaking = mode === "face" ? did.status === "speaking" : chatSpeaking;
+  const speaking = mode === "face" ? face.status === "speaking" : chatSpeaking;
   const busy = thinking || speaking;
 
   const toggleHandsFree = () => {
@@ -442,6 +441,7 @@ export default function VoiceAssistant() {
   const onMicClick = () => {
     if (speaking) {
       if (mode === "chat") stopSpeaking();
+      else face.interrupt();
       return;
     }
     if (listening) stopListening();
@@ -452,7 +452,7 @@ export default function VoiceAssistant() {
     setMode(next);
     latest.current.mode = next;
     stopSpeaking();
-    if (next === "chat") did.disconnect();
+    if (next === "chat") face.disconnect();
     try {
       window.localStorage.setItem("pa_mode", next);
     } catch {
@@ -473,7 +473,7 @@ export default function VoiceAssistant() {
       ? "Speaking"
       : listening
         ? "Listening"
-        : did.status === "connecting" && mode === "face"
+        : face.status === "connecting" && mode === "face"
           ? "Connecting"
           : handsFree
             ? "Hands-free · the mic re-opens after each reply"
@@ -563,13 +563,7 @@ export default function VoiceAssistant() {
         <section className="relative flex min-h-0 flex-col">
           {mode === "face" ? (
             <div className="min-h-0 flex-1 pb-2">
-              <FaceStage
-                videoRef={did.videoRef}
-                status={did.status}
-                face={did.face}
-                error={did.error}
-                onUpload={did.uploadFace}
-              />
+              <FaceStage videoRef={face.videoRef} audioRef={face.audioRef} status={face.status} />
             </div>
           ) : (
             <TranscriptList turns={turns} listRef={transcriptRef} />
@@ -644,7 +638,7 @@ export default function VoiceAssistant() {
           <button
             onClick={onMicClick}
             aria-label={listening ? "Send what you said" : "Start listening"}
-            disabled={thinking || (speaking && mode === "face")}
+            disabled={thinking}
             className={`relative flex h-16 w-16 items-center justify-center rounded-full transition disabled:opacity-40 ${
               listening
                 ? "bg-rose-500 shadow-[0_0_36px_rgba(244,63,94,0.45)]"

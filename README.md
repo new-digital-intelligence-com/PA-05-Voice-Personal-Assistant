@@ -9,10 +9,11 @@ says. A toggle in the header switches between **Face** and plain **Chat**.
 - **Brain:** Claude Haiku 4.5 (`claude-haiku-4-5`) via the Anthropic Messages API, in a
   server-side tool-use loop.
 - **Ears:** the browser's Web Speech API — speech recognition never leaves the device.
-- **Face + voice (Face mode):** [D-ID](https://d-id.com) Talks Streams. A still portrait
-  plus her reply text becomes a WebRTC video stream of a real-looking person speaking.
-- **Voice (Chat mode):** ElevenLabs when `ELEVENLABS_API_KEY` is set, otherwise the
-  browser's own speech synthesis.
+- **Face (Face mode):** [Simli](https://simli.com). Her voice is streamed to Simli as raw
+  PCM and comes back as a WebRTC video of a real-looking person lip-syncing to it — one
+  continuous stream, not a clip per sentence.
+- **Voice:** ElevenLabs. Required for Face mode (Simli needs audio to animate); in Chat
+  mode it falls back to the browser's own speech synthesis when no key is set.
 - **Hands:** Google Calendar + Gmail REST APIs, called with the signed-in user's OAuth
   token, plus a small local reminders store.
 - **Answers:** spoken as short prose, and shown as cards — calendar rows, inbox rows,
@@ -38,24 +39,24 @@ says. A toggle in the header switches between **Face** and plain **Chat**.
 
 3. **Enable the APIs** in the same project: Gmail API and Google Calendar API.
 
-4. **Her face** — get an API key at [studio.d-id.com](https://studio.d-id.com) (Account →
-   API Key) and set it:
+4. **Her face** — at [app.simli.com](https://app.simli.com): copy your **API key**, then
+   click **Create Avatar** and upload a portrait to get a **face ID**. The photo should be
+   front-facing with one face and eyes open, and must be your own, someone who agreed, or
+   an AI-generated face. Put both in `.env.local`:
 
    ```
-   DID_API_KEY=...
+   SIMLI_API_KEY=...
+   SIMLI_FACE_ID=...
    ```
 
-   Without it, Face mode shows a note and Chat mode still works normally.
+   Without them, Face mode shows a note and Chat mode still works normally. The still
+   portrait shown before the stream connects is `public/face.png` — replace it with the
+   same photo you gave Simli.
 
-   The portrait she wears ships at `public/face.png` and is uploaded to D-ID the first
-   time she is needed. To change her, click **Change face** in the app and pick another
-   photo — front-facing, one face, eyes open, cropped close to the head. It must be your
-   own photo, someone who agreed, or an AI-generated face.
-
-5. **Chat-mode voice (optional).** An [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
-   key in `ELEVENLABS_API_KEY` gives a natural voice in Chat mode. Without it the app
-   falls back to the browser voice — nothing breaks, it just sounds robotic. The key only
-   needs **Text to Speech** access.
+5. **Her voice** — an [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) key in
+   `ELEVENLABS_API_KEY`. Face mode needs it: Simli animates audio, so without speech there
+   is nothing to lip-sync. Chat mode falls back to the browser voice without it. The key
+   only needs **Text to Speech** access.
 
 6. Run it:
 
@@ -96,30 +97,29 @@ What she handles today:
 app/
   page.tsx                       Renders the assistant
   api/chat/route.ts              Claude Haiku tool-use loop (max 8 iterations)
-  api/did/route.ts               D-ID stream lifecycle: create, sdp, ice, talk, close
-  api/did/face/route.ts          Portrait upload; caches the D-ID image URL
-  api/tts/route.ts               ElevenLabs proxy for Chat mode (501 = fall back)
+  api/simli/route.ts             Simli session token + ICE servers (key stays server-side)
+  api/tts/route.ts               ElevenLabs proxy — mp3 for Chat, PCM16 for Simli
   api/auth/google/…              OAuth start + callback; tokens go in the session cookie
   api/session/route.ts           Connection status for the UI
 lib/
   tools.ts                       Tool schemas + executors (Calendar, Gmail, reminders)
   google.ts                      OAuth URLs, token exchange/refresh, authorised fetch
-  did.ts                         D-ID REST client; the API key never leaves the server
+  simli.ts                       Simli session creation; the API key never leaves the server
   session.ts                     AES-256-GCM encrypted, httpOnly session cookie
   cards.ts                       Turns tool output into structured cards for the UI
   reminders.ts                   JSON-file reminder store (data/reminders.json)
 components/
   VoiceAssistant.tsx             Mic, transcript, mode switching, hands-free loop
-  useDidStream.ts                WebRTC peer connection and speak/idle state
-  FaceStage.tsx                  Video stage, portrait fallback, face upload
+  useSimliStream.ts              Simli session, PCM streaming, speak/idle state
+  FaceStage.tsx                  Video stage with the still portrait behind it
   Cards.tsx                      Calendar / inbox / reminder / confirmation cards
-public/face.png                  The portrait she wears by default
+public/face.png                  Still portrait shown until the live face connects
 ```
 
 The chat route is stateless: the browser keeps the plain-text conversation and posts the
 last 20 turns with each request. Tool calls run entirely server-side within one request,
-so the Google access token never reaches the browser. The D-ID stream is opened on her
-first reply and reused, since an open stream is what costs credits.
+so the Google access token never reaches the browser. The Simli session is opened as
+soon as Face mode loads and held open, so she is always ready to speak.
 
 ### Safety rails
 
@@ -128,8 +128,8 @@ first reply and reused, since an open stream is what costs credits.
   yes in a *previous* turn before calling them.
 - `create_email_draft` is the offered fallback whenever the user hesitates.
 - Google tokens live only in an encrypted `httpOnly` cookie keyed by `SESSION_SECRET`.
-- The D-ID and ElevenLabs keys stay server-side; the browser only ever sees SDP, ICE
-  candidates and a video track.
+- The Simli and ElevenLabs keys stay server-side; the browser only ever receives a
+  short-lived session token and the media stream.
 
 ## Notes
 
@@ -138,6 +138,9 @@ first reply and reused, since an open stream is what costs credits.
 - Deploying: set `APP_URL` and `GOOGLE_REDIRECT_URI` to the production origin, and add
   that callback URL in Google Cloud Console as well.
 - Costs: Haiku 4.5 is $1 / $5 per million input / output tokens — a typical exchange is a
-  fraction of a cent. D-ID bills per minute of streamed video and is the expensive part;
-  Chat mode costs nothing beyond the model.
+  fraction of a cent. Simli bills per minute of streamed video and ElevenLabs per
+  character; Chat mode without an ElevenLabs key costs nothing beyond the model.
+- `simli-client` 3.0.2 ships `dist/client.js` but its index re-exports `"./Client"`, which
+  only resolves on case-insensitive filesystems. `useSimliStream.ts` imports the module
+  directly to stay portable.
 - Face mode needs WebRTC. If a network blocks it, Chat mode still works everywhere.
