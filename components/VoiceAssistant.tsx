@@ -20,11 +20,6 @@ type Latest = {
   startListening: () => void;
 };
 
-/**
- * How long you have to stay quiet before your turn is sent. Long enough to pause and
- * think mid-sentence without being cut off. Tune with NEXT_PUBLIC_SILENCE_MS.
- */
-const SILENCE_MS = Number(process.env.NEXT_PUBLIC_SILENCE_MS ?? 10000);
 /** Her opening words go out as soon as this much text exists, mid-sentence if need be. */
 const FIRST_UTTERANCE = 18;
 /**
@@ -236,24 +231,12 @@ export default function VoiceAssistant() {
     const recognition = new Recognition();
     recognition.lang = navigator.language || "en-US";
     recognition.interimResults = true;
-    // Continuous, with our own end-of-speech timer: the browser's built-in endpointing
-    // waits far longer than a conversation can afford.
     recognition.continuous = true;
     recognition.maxAlternatives = 1;
 
     let finalText = "";
-    let lastVoiceAt = Date.now();
-    let hush: number | null = null;
-    let hushFired = false;
-
-    const armHush = () => {
-      lastVoiceAt = Date.now();
-      if (hush !== null) window.clearTimeout(hush);
-      hush = window.setTimeout(() => {
-        hushFired = true;
-        recognition.stop();
-      }, SILENCE_MS);
-    };
+    let lastInterim = "";
+    stopRequestedRef.current = false;
 
     recognition.onresult = (event) => {
       let interimText = "";
@@ -262,38 +245,36 @@ export default function VoiceAssistant() {
         if (result.isFinal) finalText += result[0].transcript;
         else interimText += result[0].transcript;
       }
+      lastInterim = interimText;
       setInterim(interimText);
-      armHush();
     };
-    recognition.onspeechstart = armHush;
 
     recognition.onerror = (event) => {
       if (event.error !== "no-speech" && event.error !== "aborted") {
         setError(`Microphone error: ${event.error}`);
+        stopRequestedRef.current = true;
         setHandsFree(false);
         latest.current.handsFree = false;
       }
     };
 
     recognition.onend = () => {
-      // Chrome gives up on its own after a few seconds of quiet. If neither our silence
-      // timer nor the user asked to stop, keep the mic open so a long pause mid-thought
-      // does not send the sentence half-finished.
-      if (!hushFired && !stopRequestedRef.current && Date.now() - lastVoiceAt < SILENCE_MS) {
+      // Nothing is sent until the mic button says so. Chrome stops listening by itself
+      // after a few seconds of quiet, so simply start it again.
+      if (!stopRequestedRef.current) {
         try {
           recognition.start();
           return;
         } catch {
-          /* cannot restart — fall through and submit what we have */
+          /* cannot restart — fall through and send what we have */
         }
       }
 
-      if (hush !== null) window.clearTimeout(hush);
       recognitionRef.current = null;
       stopRequestedRef.current = false;
       setListening(false);
       setInterim("");
-      const text = finalText.trim();
+      const text = (finalText.trim() || lastInterim.trim()).trim();
       if (text) latest.current.send(text);
       else if (latest.current.handsFree) window.setTimeout(() => latest.current.startListening(), 400);
     };
@@ -536,7 +517,7 @@ export default function VoiceAssistant() {
         : did.status === "connecting" && mode === "face"
           ? "Connecting"
           : handsFree
-            ? "Hands-free · she listens after each reply"
+            ? "Hands-free · the mic re-opens after each reply"
             : "Tap the mic and talk";
 
   return (
@@ -703,7 +684,7 @@ export default function VoiceAssistant() {
 
           <button
             onClick={onMicClick}
-            aria-label={listening ? "Stop listening" : "Start listening"}
+            aria-label={listening ? "Send what you said" : "Start listening"}
             disabled={thinking || (speaking && mode === "face")}
             className={`relative flex h-16 w-16 items-center justify-center rounded-full transition disabled:opacity-40 ${
               listening
@@ -712,10 +693,17 @@ export default function VoiceAssistant() {
             }`}
           >
             {listening && <span className="absolute inset-0 animate-ping rounded-full bg-rose-500/40" />}
-            <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
-              <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
-              <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
-            </svg>
+            {listening ? (
+              // Send arrow: tapping again is what submits the turn.
+              <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
+                <path d="M3.4 20.4 21 12 3.4 3.6 3.39 10l12.6 2-12.6 2z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
+                <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
+                <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
+              </svg>
+            )}
           </button>
 
           <div className="w-[86px]" />
