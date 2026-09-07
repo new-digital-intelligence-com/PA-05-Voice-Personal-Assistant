@@ -13,8 +13,16 @@ Load it from .env.local instead.
 
 1. PREPARE THE PHOTO
 --------------------
-Simli only accepts SQUARE images. Give it a square yourself, or it crops the
-middle and can cut off the top of the head.
+Simli only accepts SQUARE images whose side is a MULTIPLE OF 512. Anything else
+it fixes itself, and says so in "warnings":
+
+  "Image needed to be cropped as it isn't square"
+      -> it centre-cropped; the head can end up cut off
+  "required fractional scaling as it's not a multiple of 512, some details
+   may be lost"
+      -> this is where sharpness goes
+
+So 1024x1024 is the sweet spot: no crop, no rescale, nothing lost.
 
 To keep the whole photo, pad it to square instead of cropping (blurred copy of
 itself behind, so there are no black bars):
@@ -90,5 +98,7 @@ Voice Library voices:
 
 CURRENT AVATARS
 ---------------
-  2556384f-d584-43ca-85cb-7f0b07993a0a   square crop, in use
-  283e4bc5-dad0-41ea-8997-43313299e5de   full frame padded to square
+  2556384f-d584-43ca-85cb-7f0b07993a0a   square crop of the portrait
+  283e4bc5-dad0-41ea-8997-43313299e5de   portrait padded to square (blurred sides)
+  47b0138e-1d3d-4366-8405-c6de35eea264   portrait, full-width square of the scene
+  512ba61a-a234-4f77-a04c-11119a38f732   landscape photo, uploaded unedited
