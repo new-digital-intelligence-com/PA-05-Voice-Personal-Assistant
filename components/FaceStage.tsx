@@ -11,10 +11,12 @@ type Props = {
 
 export default function FaceStage({ videoRef, audioRef, status }: Props) {
   const live = status === "live" || status === "speaking";
-  // Simli streams a fixed-resolution square. Blowing it up several times over is what
-  // made her soft; a modest ceiling keeps her large without turning to mush.
+  // Simli streams a fixed-resolution square, and nothing can make it sharper than the
+  // frame it arrives in. Displayed one-for-one, so no pixel is ever stretched.
+  // NEXT_PUBLIC_FACE_SCALE trades that away for size if you want her bigger.
   const [nativeHeight, setNativeHeight] = useState<number | null>(null);
-  const maxHeight = nativeHeight ? Math.round(nativeHeight * 1.6) : null;
+  const scale = Number(process.env.NEXT_PUBLIC_FACE_SCALE ?? 1) || 1;
+  const maxHeight = nativeHeight ? Math.round(nativeHeight * scale) : null;
 
   return (
     <div className="relative flex h-full w-full items-center justify-center">
