@@ -20,8 +20,11 @@ type Latest = {
   startListening: () => void;
 };
 
-/** Silence, in ms, that ends your turn. Short enough to feel like a conversation. */
-const SILENCE_MS = 800;
+/**
+ * How long you have to stay quiet before your turn is sent. Long enough to pause and
+ * think mid-sentence without being cut off. Tune with NEXT_PUBLIC_SILENCE_MS.
+ */
+const SILENCE_MS = Number(process.env.NEXT_PUBLIC_SILENCE_MS ?? 10000);
 /** Her opening words go out as soon as this much text exists, mid-sentence if need be. */
 const FIRST_UTTERANCE = 18;
 /**
@@ -105,6 +108,8 @@ export default function VoiceAssistant() {
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const prewarmRef = useRef<(() => void) | null>(null);
+  /** Set when the user (not the silence timer) ends the turn. */
+  const stopRequestedRef = useRef(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -237,10 +242,17 @@ export default function VoiceAssistant() {
     recognition.maxAlternatives = 1;
 
     let finalText = "";
+    let lastVoiceAt = Date.now();
     let hush: number | null = null;
+    let hushFired = false;
+
     const armHush = () => {
+      lastVoiceAt = Date.now();
       if (hush !== null) window.clearTimeout(hush);
-      hush = window.setTimeout(() => recognition.stop(), SILENCE_MS);
+      hush = window.setTimeout(() => {
+        hushFired = true;
+        recognition.stop();
+      }, SILENCE_MS);
     };
 
     recognition.onresult = (event) => {
@@ -264,8 +276,21 @@ export default function VoiceAssistant() {
     };
 
     recognition.onend = () => {
+      // Chrome gives up on its own after a few seconds of quiet. If neither our silence
+      // timer nor the user asked to stop, keep the mic open so a long pause mid-thought
+      // does not send the sentence half-finished.
+      if (!hushFired && !stopRequestedRef.current && Date.now() - lastVoiceAt < SILENCE_MS) {
+        try {
+          recognition.start();
+          return;
+        } catch {
+          /* cannot restart — fall through and submit what we have */
+        }
+      }
+
       if (hush !== null) window.clearTimeout(hush);
       recognitionRef.current = null;
+      stopRequestedRef.current = false;
       setListening(false);
       setInterim("");
       const text = finalText.trim();
@@ -286,6 +311,7 @@ export default function VoiceAssistant() {
   const stopListening = useCallback(() => {
     setHandsFree(false);
     latest.current.handsFree = false;
+    stopRequestedRef.current = true;
     recognitionRef.current?.stop();
   }, []);
 
@@ -464,6 +490,7 @@ export default function VoiceAssistant() {
     if (handsFree) {
       setHandsFree(false);
       latest.current.handsFree = false;
+      stopRequestedRef.current = true;
       recognitionRef.current?.stop();
     } else {
       setHandsFree(true);
