@@ -171,6 +171,9 @@ export async function createStream(sourceUrl: string): Promise<StreamSession> {
       source_url: sourceUrl,
       output_resolution: resolution,
       stream_warmup: true,
+      // Cap how long an abandoned stream keeps holding one of the account's
+      // concurrent sessions. Without this they linger for minutes.
+      session_timeout: Number(process.env.DID_SESSION_TIMEOUT ?? 180),
     }),
   );
 }

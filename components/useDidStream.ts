@@ -113,12 +113,27 @@ export function useDidStream(onSpeechEnd?: () => void) {
       setStatus("connecting");
       setError(null);
 
-      const { id, sessionId, offer, iceServers } = await didApi<{
-        id: string;
-        sessionId: string;
-        offer: RTCSessionDescriptionInit;
-        iceServers: RTCIceServer[];
-      }>({ action: "create" });
+      // A stream abandoned by an earlier tab keeps its session for a short while.
+      // Rather than fail outright, wait for one to free up.
+      let created;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          created = await didApi<{
+            id: string;
+            sessionId: string;
+            offer: RTCSessionDescriptionInit;
+            iceServers: RTCIceServer[];
+          }>({ action: "create" });
+          break;
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "";
+          if (!/max user sessions/i.test(message) || attempt >= 5) throw e;
+          setError("Waiting for an earlier video session to close…");
+          await new Promise((r) => setTimeout(r, 8000));
+        }
+      }
+      setError(null);
+      const { id, sessionId, offer, iceServers } = created;
 
       const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
