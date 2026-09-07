@@ -25,9 +25,12 @@ async function didApi<T = Record<string, unknown>>(payload: Api): Promise<T> {
 }
 
 /**
- * Holds a D-ID Talks Stream: a photoreal face delivered as a live WebRTC video
- * track. `speak()` connects on first use and reuses the stream after that, since
- * an open stream is what costs credits.
+ * Holds a D-ID Talks Stream: a photoreal face delivered as a live WebRTC video track.
+ *
+ * A reply arrives as several `speak()` calls — one per sentence, as the model writes
+ * them — so she starts talking before the answer is finished. `endTurn()` marks the
+ * last sentence as sent; the turn is only over once every utterance has played, which
+ * is what re-opens the mic in hands-free mode.
  */
 export function useDidStream(onSpeechEnd?: () => void) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -35,8 +38,11 @@ export function useDidStream(onSpeechEnd?: () => void) {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const streamRef = useRef<{ id: string; sessionId: string } | null>(null);
   const connectingRef = useRef<Promise<void> | null>(null);
-  const endTimerRef = useRef<number | null>(null);
   const endCallbackRef = useRef(onSpeechEnd);
+
+  const pendingRef = useRef(0);
+  const turnOpenRef = useRef(false);
+  const timersRef = useRef<number[]>([]);
 
   const [status, setStatus] = useState<FaceStatus>("idle");
   const [face, setFace] = useState<string | null>(null);
@@ -56,16 +62,28 @@ export function useDidStream(onSpeechEnd?: () => void) {
       .catch(() => undefined);
   }, []);
 
-  const finishSpeaking = useCallback(() => {
-    if (endTimerRef.current !== null) {
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = null;
-    }
-    setStatus((s) => (s === "speaking" ? "live" : s));
-    endCallbackRef.current?.();
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach((t) => window.clearTimeout(t));
+    timersRef.current = [];
   }, []);
 
+  /** The turn is done only when nothing is queued and no more sentences are coming. */
+  const settle = useCallback(() => {
+    if (pendingRef.current > 0 || turnOpenRef.current) return;
+    clearTimers();
+    setStatus((s) => (s === "speaking" ? "live" : s));
+    endCallbackRef.current?.();
+  }, [clearTimers]);
+
+  const utteranceFinished = useCallback(() => {
+    pendingRef.current = Math.max(0, pendingRef.current - 1);
+    settle();
+  }, [settle]);
+
   const teardown = useCallback(() => {
+    clearTimers();
+    pendingRef.current = 0;
+    turnOpenRef.current = false;
     channelRef.current?.close();
     channelRef.current = null;
     pcRef.current?.close();
@@ -73,7 +91,7 @@ export function useDidStream(onSpeechEnd?: () => void) {
     const open = streamRef.current;
     streamRef.current = null;
     if (open) void didApi({ action: "close", ...open }).catch(() => undefined);
-  }, []);
+  }, [clearTimers]);
 
   const connect = useCallback(async () => {
     if (streamRef.current && pcRef.current?.connectionState === "connected") return;
@@ -100,7 +118,7 @@ export function useDidStream(onSpeechEnd?: () => void) {
       channel.onmessage = (event) => {
         const message = String(event.data);
         if (message.startsWith("stream/started")) setStatus("speaking");
-        if (message.startsWith("stream/done")) finishSpeaking();
+        if (message.startsWith("stream/done")) utteranceFinished();
       };
 
       pc.onicecandidate = (event) => {
@@ -149,48 +167,82 @@ export function useDidStream(onSpeechEnd?: () => void) {
     } finally {
       connectingRef.current = null;
     }
-  }, [finishSpeaking, teardown]);
+  }, [teardown, utteranceFinished]);
+
+  /** Open the stream ahead of time so the first sentence does not wait on a handshake. */
+  const prewarm = useCallback(() => {
+    if (status === "unconfigured" || status === "no-face") return;
+    void connect().catch(() => undefined);
+  }, [connect, status]);
+
+  const beginTurn = useCallback(() => {
+    turnOpenRef.current = true;
+  }, []);
+
+  const endTurn = useCallback(() => {
+    turnOpenRef.current = false;
+    settle();
+  }, [settle]);
 
   const speak = useCallback(
     async (text: string) => {
+      if (!text.trim()) return;
       try {
+        pendingRef.current += 1;
+        setStatus("speaking");
         await connect();
         const open = streamRef.current;
         if (!open) throw new Error("Stream is not open");
-        setStatus("speaking");
         await didApi({ action: "talk", ...open, text });
 
-        // Safety net: if the done-event never arrives, release on an estimate of how
-        // long the line takes to say (~14 characters a second) plus a little slack.
-        if (endTimerRef.current !== null) window.clearTimeout(endTimerRef.current);
-        endTimerRef.current = window.setTimeout(finishSpeaking, (text.length / 14) * 1000 + 6000);
+        // Safety net: if a done-event never arrives, release on an estimate of how long
+        // the line takes to say (~14 characters a second) plus slack.
+        timersRef.current.push(
+          window.setTimeout(utteranceFinished, (text.length / 14) * 1000 + 8000),
+        );
       } catch (e) {
+        pendingRef.current = Math.max(0, pendingRef.current - 1);
         setStatus("error");
         setError(e instanceof Error ? e.message : "She could not speak");
+        turnOpenRef.current = false;
         endCallbackRef.current?.();
       }
     },
-    [connect, finishSpeaking],
+    [connect, utteranceFinished],
   );
 
-  const uploadFace = useCallback(async (file: File) => {
-    setError(null);
-    const form = new FormData();
-    form.append("image", file);
-    const res = await fetch("/api/did/face", { method: "POST", body: form });
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.error ?? "Upload failed");
-      return;
-    }
-    // A new portrait means the open stream is showing the wrong person.
-    teardown();
-    // Cache-bust so the browser does not keep showing the previous photo.
-    setFace(`${data.preview}?v=${Date.now()}`);
-    setStatus("idle");
-  }, [teardown]);
+  const uploadFace = useCallback(
+    async (file: File) => {
+      setError(null);
+      const form = new FormData();
+      form.append("image", file);
+      const res = await fetch("/api/did/face", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Upload failed");
+        return;
+      }
+      // A new portrait means the open stream is showing the wrong person.
+      teardown();
+      // Cache-bust so the browser does not keep showing the previous photo.
+      setFace(`${data.preview}?v=${Date.now()}`);
+      setStatus("idle");
+    },
+    [teardown],
+  );
 
   useEffect(() => teardown, [teardown]);
 
-  return { videoRef, status, face, error, speak, connect, uploadFace, disconnect: teardown };
+  return {
+    videoRef,
+    status,
+    face,
+    error,
+    speak,
+    prewarm,
+    beginTurn,
+    endTurn,
+    uploadFace,
+    disconnect: teardown,
+  };
 }

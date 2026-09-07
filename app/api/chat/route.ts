@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 import { GoogleClient } from "@/lib/google";
-import { readSession, sessionCookie } from "@/lib/session";
+import { readSession } from "@/lib/session";
 import { runTool, tools, type ToolContext } from "@/lib/tools";
 import { toCards, type Card } from "@/lib/cards";
 
@@ -24,6 +24,8 @@ function systemPrompt(ctx: ToolContext, email: string | null) {
     "",
     "Tool use:",
     "- Call get_current_time before reasoning about any relative date such as \"tomorrow\" or \"next week\".",
+    "- Before a tool call that takes a moment, say one short sentence about what you are doing — it is spoken",
+    "  immediately, so the user is not left in silence.",
     "- Prefer acting over asking. If a request is clear, do it and confirm briefly in the past tense.",
     "- Ask one short clarifying question only when a required detail is genuinely missing.",
     "",
@@ -65,69 +67,90 @@ export async function POST(request: Request) {
   const actions: Action[] = [];
   const cards: Card[] = [];
 
-  let reply = "";
+  const encoder = new TextEncoder();
 
-  try {
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const response = await client.messages.create({
-        model: MODEL,
-        max_tokens: 2048,
-        system: systemPrompt(ctx, session.google?.email ?? null),
-        tools,
-        messages,
-      });
+  // Streamed so the browser can start speaking the first sentence while the rest of
+  // the answer is still being written, instead of waiting for the whole turn.
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 
-      reply = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === "text")
-        .map((b) => b.text)
-        .join(" ")
-        .trim();
+      let reply = "";
 
-      if (response.stop_reason !== "tool_use") break;
+      try {
+        for (let i = 0; i < MAX_ITERATIONS; i++) {
+          const turn = client.messages.stream({
+            model: MODEL,
+            max_tokens: 2048,
+            system: systemPrompt(ctx, session.google?.email ?? null),
+            tools,
+            messages,
+          });
 
-      const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
-      messages.push({ role: "assistant", content: response.content });
+          turn.on("text", (delta) => {
+            reply += delta;
+            send({ type: "text", delta });
+          });
 
-      const results: Anthropic.ToolResultBlockParam[] = await Promise.all(
-        toolUses.map(async (block) => {
-          try {
-            const output = await runTool(block.name, block.input, ctx);
-            actions.push({ tool: block.name, input: block.input, ok: true });
-            cards.push(...toCards(block.name, output));
-            return { type: "tool_result" as const, tool_use_id: block.id, content: output };
-          } catch (e) {
-            actions.push({ tool: block.name, input: block.input, ok: false });
-            return {
-              type: "tool_result" as const,
-              tool_use_id: block.id,
-              content: e instanceof Error ? e.message : "Tool failed.",
-              is_error: true,
-            };
-          }
-        }),
-      );
+          const response = await turn.finalMessage();
+          if (response.stop_reason !== "tool_use") break;
 
-      messages.push({ role: "user", content: results });
-    }
-  } catch (e) {
-    const message =
-      e instanceof Anthropic.APIError
-        ? `Claude API error (${e.status}): ${e.message}`
-        : e instanceof Error
-          ? e.message
-          : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 502 });
-  }
+          const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+          messages.push({ role: "assistant", content: response.content });
 
-  const payload = NextResponse.json({
-    reply: reply || "Sorry, I did not catch that. Could you say it again?",
-    actions,
-    cards,
+          const results: Anthropic.ToolResultBlockParam[] = await Promise.all(
+            toolUses.map(async (block) => {
+              try {
+                const output = await runTool(block.name, block.input, ctx);
+                actions.push({ tool: block.name, input: block.input, ok: true });
+                const fresh = toCards(block.name, output);
+                cards.push(...fresh);
+                if (fresh.length) send({ type: "cards", cards: fresh });
+                return { type: "tool_result" as const, tool_use_id: block.id, content: output };
+              } catch (e) {
+                actions.push({ tool: block.name, input: block.input, ok: false });
+                return {
+                  type: "tool_result" as const,
+                  tool_use_id: block.id,
+                  content: e instanceof Error ? e.message : "Tool failed.",
+                  is_error: true,
+                };
+              }
+            }),
+          );
+
+          messages.push({ role: "user", content: results });
+          send({ type: "actions", actions });
+        }
+
+        send({
+          type: "done",
+          reply: reply.trim() || "Sorry, I did not catch that. Could you say it again?",
+          actions,
+          cards,
+        });
+      } catch (e) {
+        const message =
+          e instanceof Anthropic.APIError
+            ? `Claude API error (${e.status}): ${e.message}`
+            : e instanceof Error
+              ? e.message
+              : "Unknown error";
+        send({ type: "error", error: message });
+      } finally {
+        controller.close();
+      }
+    },
   });
 
-  // The Google access token may have been refreshed mid-request — persist it.
-  if (google?.dirty) {
-    payload.cookies.set(sessionCookie({ ...session, google: google.current }));
-  }
-  return payload;
+  // Note: a Google access token refreshed mid-stream cannot be written back to the
+  // cookie — headers are already sent. The next request simply refreshes again.
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }

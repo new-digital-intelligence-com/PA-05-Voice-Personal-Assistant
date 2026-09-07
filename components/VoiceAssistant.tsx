@@ -20,6 +20,9 @@ type Latest = {
   startListening: () => void;
 };
 
+/** Shortest chunk worth sending to D-ID as its own utterance. */
+const MIN_UTTERANCE = 30;
+
 const PROMPTS = [
   "What's on my calendar tomorrow?",
   "Any unread email this week?",
@@ -94,6 +97,7 @@ export default function VoiceAssistant() {
   );
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const prewarmRef = useRef<(() => void) | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -256,6 +260,10 @@ export default function VoiceAssistant() {
     setError(null);
     setListening(true);
     recognition.start();
+
+    // Open the video stream while the user is still talking, so her first sentence
+    // does not wait on a WebRTC handshake.
+    if (latest.current.mode === "face") prewarmRef.current?.();
   }, []);
 
   const stopListening = useCallback(() => {
@@ -266,6 +274,29 @@ export default function VoiceAssistant() {
 
   /* --------------------------------------------------------------- turns */
 
+  /**
+   * Splits a growing reply on sentence boundaries so each finished sentence can be
+   * spoken while the next one is still being written.
+   */
+  const takeSentences = (buffer: string, atEnd: boolean): [string[], string] => {
+    const out: string[] = [];
+    let rest = buffer;
+    const boundary = /[.!?…]["')\]]?\s+|\n+/;
+    for (;;) {
+      const match = boundary.exec(rest);
+      if (!match) break;
+      const cut = match.index + match[0].length;
+      const sentence = rest.slice(0, cut).trim();
+      if (sentence) out.push(sentence);
+      rest = rest.slice(cut);
+    }
+    if (atEnd && rest.trim()) {
+      out.push(rest.trim());
+      rest = "";
+    }
+    return [out, rest];
+  };
+
   const send = useCallback(
     async (text: string) => {
       const next: Turn[] = [...latest.current.turns, { role: "user", content: text }];
@@ -273,6 +304,23 @@ export default function VoiceAssistant() {
       setTurns(next);
       setThinking(true);
       setError(null);
+
+      const face = latest.current.mode === "face" && !latest.current.muted;
+      if (face) did.beginTurn();
+
+      let spoken = "";
+      let buffer = "";
+      // Each utterance is a separate render request, so avoid firing off "Hello!" on
+      // its own — group finished sentences until there is a worthwhile chunk.
+      let chunk = "";
+      let full = "";
+      let cards: Card[] = [];
+
+      const paint = () => {
+        const withReply: Turn[] = [...next, { role: "assistant", content: full, cards }];
+        latest.current.turns = withReply;
+        setTurns(withReply);
+      };
 
       try {
         const res = await fetch("/api/chat", {
@@ -283,25 +331,79 @@ export default function VoiceAssistant() {
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Request failed");
 
-        const withReply: Turn[] = [
-          ...next,
-          { role: "assistant", content: data.reply, cards: data.cards ?? [] },
-        ];
-        latest.current.turns = withReply;
-        setTurns(withReply);
+        if (!res.ok || !res.body) {
+          const failed = await res.json().catch(() => ({}));
+          throw new Error(failed.error ?? `Request failed (${res.status})`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let carry = "";
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          carry += decoder.decode(value, { stream: true });
+
+          const frames = carry.split("\n\n");
+          carry = frames.pop() ?? "";
+
+          for (const frame of frames) {
+            const line = frame.trim();
+            if (!line.startsWith("data:")) continue;
+            const event = JSON.parse(line.slice(5).trim());
+
+            if (event.type === "text") {
+              setThinking(false);
+              full += event.delta;
+              buffer += event.delta;
+              paint();
+              if (face) {
+                const [sentences, rest] = takeSentences(buffer, false);
+                buffer = rest;
+                for (const sentence of sentences) {
+                  chunk = chunk ? `${chunk} ${sentence}` : sentence;
+                }
+                if (chunk.length >= MIN_UTTERANCE) {
+                  spoken += chunk;
+                  void did.speak(chunk);
+                  chunk = "";
+                }
+              }
+            } else if (event.type === "cards") {
+              cards = [...cards, ...event.cards];
+              paint();
+            } else if (event.type === "error") {
+              throw new Error(event.error);
+            } else if (event.type === "done") {
+              full = event.reply ?? full;
+              cards = event.cards ?? cards;
+              paint();
+            }
+          }
+        }
+
         setThinking(false);
 
-        if (latest.current.mode === "face" && !latest.current.muted) {
-          // She says it herself, in video.
-          void did.speak(data.reply);
+        if (face) {
+          // Anything left after the last sentence boundary.
+          const [tail] = takeSentences(buffer, true);
+          for (const sentence of tail) {
+            chunk = chunk ? `${chunk} ${sentence}` : sentence;
+          }
+          if (chunk.trim()) {
+            spoken += chunk;
+            void did.speak(chunk);
+          }
+          if (!spoken.trim() && full.trim()) void did.speak(full);
+          did.endTurn();
         } else {
-          void speakInChat(data.reply, onSpeechEnd);
+          void speakInChat(full, onSpeechEnd);
         }
       } catch (e) {
         setThinking(false);
+        if (face) did.endTurn();
         setError(e instanceof Error ? e.message : "Something went wrong");
         setHandsFree(false);
         latest.current.handsFree = false;
@@ -309,6 +411,10 @@ export default function VoiceAssistant() {
     },
     [did, speakInChat, onSpeechEnd],
   );
+
+  useEffect(() => {
+    prewarmRef.current = did.prewarm;
+  }, [did.prewarm]);
 
   useEffect(() => {
     latest.current = {
