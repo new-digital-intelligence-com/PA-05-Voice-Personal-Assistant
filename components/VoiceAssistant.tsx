@@ -20,8 +20,12 @@ type Latest = {
   startListening: () => void;
 };
 
-/** Shortest chunk worth sending to D-ID as its own utterance. */
-const MIN_UTTERANCE = 30;
+/** Silence, in ms, that ends your turn. Short enough to feel like a conversation. */
+const SILENCE_MS = 800;
+/** Her opening words go out as soon as this much text exists, mid-sentence if need be. */
+const FIRST_UTTERANCE = 18;
+/** After she is already talking, prefer whole sentences of at least this length. */
+const MIN_UTTERANCE = 45;
 
 const PROMPTS = [
   "What's on my calendar tomorrow?",
@@ -224,10 +228,17 @@ export default function VoiceAssistant() {
     const recognition = new Recognition();
     recognition.lang = navigator.language || "en-US";
     recognition.interimResults = true;
-    recognition.continuous = false;
+    // Continuous, with our own end-of-speech timer: the browser's built-in endpointing
+    // waits far longer than a conversation can afford.
+    recognition.continuous = true;
     recognition.maxAlternatives = 1;
 
     let finalText = "";
+    let hush: number | null = null;
+    const armHush = () => {
+      if (hush !== null) window.clearTimeout(hush);
+      hush = window.setTimeout(() => recognition.stop(), SILENCE_MS);
+    };
 
     recognition.onresult = (event) => {
       let interimText = "";
@@ -237,7 +248,9 @@ export default function VoiceAssistant() {
         else interimText += result[0].transcript;
       }
       setInterim(interimText);
+      armHush();
     };
+    recognition.onspeechstart = armHush;
 
     recognition.onerror = (event) => {
       if (event.error !== "no-speech" && event.error !== "aborted") {
@@ -248,6 +261,7 @@ export default function VoiceAssistant() {
     };
 
     recognition.onend = () => {
+      if (hush !== null) window.clearTimeout(hush);
       recognitionRef.current = null;
       setListening(false);
       setInterim("");
@@ -365,7 +379,18 @@ export default function VoiceAssistant() {
                 for (const sentence of sentences) {
                   chunk = chunk ? `${chunk} ${sentence}` : sentence;
                 }
-                if (chunk.length >= MIN_UTTERANCE) {
+
+                // Nothing said yet: cut at the latest word boundary rather than wait
+                // for a full stop, so she opens her mouth about a second sooner.
+                if (!spoken && !chunk && buffer.length >= FIRST_UTTERANCE) {
+                  const cut = buffer.lastIndexOf(" ");
+                  if (cut >= FIRST_UTTERANCE - 4) {
+                    chunk = buffer.slice(0, cut).trim();
+                    buffer = buffer.slice(cut);
+                  }
+                }
+
+                if (chunk && (!spoken || chunk.length >= MIN_UTTERANCE)) {
                   spoken += chunk;
                   void did.speak(chunk);
                   chunk = "";

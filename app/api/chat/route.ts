@@ -14,9 +14,11 @@ const MAX_ITERATIONS = 8;
 type ChatTurn = { role: "user" | "assistant"; content: string };
 type Action = { tool: string; input: unknown; ok: boolean };
 
-function systemPrompt(ctx: ToolContext, email: string | null) {
-  const now = new Date();
-  return [
+/**
+ * Split in two so the long, unchanging half can be cached by the API: the volatile
+ * half (the clock) goes in a second block, after the cache breakpoint.
+ */
+const STABLE_SYSTEM = [
     "You are Ava, a hands-free voice personal assistant. Your replies are spoken aloud by a speech synthesiser, so:",
     "- Answer in 1-3 short sentences of plain conversational prose. No markdown, bullet points, emoji, URLs or code.",
     "- Speak dates and times naturally (\"tomorrow at half past two\", not \"2026-09-08T14:30:00Z\").",
@@ -33,6 +35,11 @@ function systemPrompt(ctx: ToolContext, email: string | null) {
     "- Read the key details back and wait for the user's explicit yes in a later turn before calling the tool.",
     "- If the user hesitates, offer create_email_draft instead.",
     "",
+  ].join("\n");
+
+function contextPrompt(ctx: ToolContext, email: string | null) {
+  const now = new Date();
+  return [
     `Current time: ${now.toISOString()} (${now.toLocaleString("en-US", { timeZone: ctx.timezone, dateStyle: "full", timeStyle: "short" })}).`,
     `User's timezone: ${ctx.timezone}.`,
     ctx.google
@@ -83,7 +90,10 @@ export async function POST(request: Request) {
           const turn = client.messages.stream({
             model: MODEL,
             max_tokens: 2048,
-            system: systemPrompt(ctx, session.google?.email ?? null),
+            system: [
+              { type: "text", text: STABLE_SYSTEM, cache_control: { type: "ephemeral" } },
+              { type: "text", text: contextPrompt(ctx, session.google?.email ?? null) },
+            ],
             tools,
             messages,
           });
