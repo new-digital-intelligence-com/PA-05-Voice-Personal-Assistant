@@ -3,8 +3,9 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-// Rachel — a warm, natural female voice from the ElevenLabs public library.
-const DEFAULT_VOICE = "21m00Tcm4TlvDq8ikWAM";
+// Bella — a female voice that free ElevenLabs accounts can use via the API. Voices
+// from the public Voice Library return 402 without a paid plan.
+const DEFAULT_VOICE = "EXAVITQu4vr4xnSDxMaL";
 const DEFAULT_MODEL = "eleven_turbo_v2_5";
 
 export async function POST(request: Request) {
