@@ -50,8 +50,8 @@ export function useDidStream(onSpeechEnd?: () => void) {
     fetch("/api/did/face")
       .then((r) => r.json())
       .then((d) => {
-        setFace(d.face ?? null);
-        setStatus(!d.configured ? "unconfigured" : d.face ? "idle" : "no-face");
+        setFace(d.preview ?? null);
+        setStatus(!d.configured ? "unconfigured" : d.hasFace ? "idle" : "no-face");
       })
       .catch(() => undefined);
   }, []);
@@ -185,7 +185,8 @@ export function useDidStream(onSpeechEnd?: () => void) {
     }
     // A new portrait means the open stream is showing the wrong person.
     teardown();
-    setFace(data.face);
+    // Cache-bust so the browser does not keep showing the previous photo.
+    setFace(`${data.preview}?v=${Date.now()}`);
     setStatus("idle");
   }, [teardown]);
 

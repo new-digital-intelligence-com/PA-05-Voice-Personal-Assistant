@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DidError, getFaceUrl, uploadFace } from "@/lib/did";
+import { DidError, getFaceUrl, getFacePreview, uploadFace } from "@/lib/did";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -7,7 +7,11 @@ export const maxDuration = 60;
 const MAX_BYTES = 10 * 1024 * 1024;
 
 export async function GET() {
-  return NextResponse.json({ face: await getFaceUrl(), configured: Boolean(process.env.DID_API_KEY) });
+  return NextResponse.json({
+    configured: Boolean(process.env.DID_API_KEY),
+    hasFace: Boolean(await getFaceUrl()),
+    preview: await getFacePreview(),
+  });
 }
 
 export async function POST(request: Request) {
@@ -24,8 +28,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Image must be under 10 MB" }, { status: 413 });
     }
 
-    const url = await uploadFace(file);
-    return NextResponse.json({ face: url });
+    await uploadFace(file);
+    return NextResponse.json({ hasFace: true, preview: await getFacePreview() });
   } catch (e) {
     if (e instanceof DidError) return NextResponse.json({ error: e.message }, { status: e.status });
     return NextResponse.json(

@@ -10,6 +10,18 @@ const BASE = "https://api.d-id.com";
 const FACE_FILE = path.join(process.cwd(), "data", "did-face.json");
 /** Shipped portrait, uploaded to D-ID the first time she is needed. */
 const DEFAULT_FACE = path.join(process.cwd(), "public", "face.png");
+/** A copy of whatever portrait was uploaded, kept so the browser can display it. */
+const UPLOAD_FILE = path.join(process.cwd(), "data", "face-source");
+
+type FaceRecord = { url: string; mime?: string; at?: string };
+
+async function readRecord(): Promise<FaceRecord | null> {
+  try {
+    return JSON.parse(await fs.readFile(FACE_FILE, "utf8")) as FaceRecord;
+  } catch {
+    return null;
+  }
+}
 
 export class DidError extends Error {
   constructor(
@@ -65,30 +77,56 @@ const json = (body: unknown): RequestInit => ({
 export async function getFaceUrl(): Promise<string | null> {
   if (process.env.DID_SOURCE_URL) return process.env.DID_SOURCE_URL;
 
-  try {
-    const saved = JSON.parse(await fs.readFile(FACE_FILE, "utf8")) as { url?: string };
-    if (saved.url) return saved.url;
-  } catch {
-    /* nothing uploaded yet */
-  }
+  const saved = await readRecord();
+  if (saved?.url) return saved.url;
 
   if (!process.env.DID_API_KEY) return null;
   try {
     const bytes = await fs.readFile(DEFAULT_FACE);
-    return await uploadFace(new File([bytes], "face.png", { type: "image/png" }));
+    // The default portrait is already served from /face.png, so no copy is needed.
+    return await uploadFace(new File([bytes], "face.png", { type: "image/png" }), false);
   } catch {
     return null;
   }
 }
 
-export async function uploadFace(file: File): Promise<string> {
+export async function uploadFace(file: File, keepCopy = true): Promise<string> {
   const form = new FormData();
   form.append("image", file, file.name || "face.jpg");
+  // D-ID answers with an s3:// URI. Their API accepts it as a source, but a browser
+  // cannot render it — hence the local copy below for the on-screen preview.
   const result = await didFetch<{ url: string }>("/images", { method: "POST", body: form });
 
   await fs.mkdir(path.dirname(FACE_FILE), { recursive: true });
-  await fs.writeFile(FACE_FILE, JSON.stringify({ url: result.url, at: new Date().toISOString() }));
+  if (keepCopy) {
+    await fs.writeFile(UPLOAD_FILE, Buffer.from(await file.arrayBuffer()));
+  }
+  await fs.writeFile(
+    FACE_FILE,
+    JSON.stringify({
+      url: result.url,
+      mime: keepCopy ? file.type || "image/png" : undefined,
+      at: new Date().toISOString(),
+    }),
+  );
   return result.url;
+}
+
+/** URL the browser should show as her still portrait. */
+export async function getFacePreview(): Promise<string> {
+  const saved = await readRecord();
+  return saved?.mime ? "/api/did/face/image" : "/face.png";
+}
+
+/** The stored upload, for the preview route. */
+export async function readUploadedFace(): Promise<{ bytes: Buffer; mime: string } | null> {
+  const saved = await readRecord();
+  if (!saved?.mime) return null;
+  try {
+    return { bytes: await fs.readFile(UPLOAD_FILE), mime: saved.mime };
+  } catch {
+    return null;
+  }
 }
 
 /* ---------------------------------------------------------------- stream */
