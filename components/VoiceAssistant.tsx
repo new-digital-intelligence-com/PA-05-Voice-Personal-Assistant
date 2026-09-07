@@ -1,28 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
+import type { AvatarState } from "./Avatar";
+import type { Card } from "@/lib/cards";
+import CardView from "./Cards";
 
-type Turn = { role: "user" | "assistant"; content: string };
-type Action = { tool: string; input: unknown; ok: boolean };
+const Avatar = dynamic(() => import("./Avatar"), { ssr: false });
+
+type Mode = "avatar" | "chat";
+type Turn = { role: "user" | "assistant"; content: string; cards?: Card[] };
 type SessionInfo = { googleConnected: boolean; email: string | null; anthropicConfigured: boolean };
 
-const TOOL_LABELS: Record<string, string> = {
-  get_current_time: "checked the time",
-  list_calendar_events: "read your calendar",
-  create_calendar_event: "created an event",
-  delete_calendar_event: "deleted an event",
-  search_email: "searched your inbox",
-  read_email: "read an email",
-  create_email_draft: "saved a draft",
-  send_email: "sent an email",
-  add_reminder: "added a reminder",
-  list_reminders: "read your reminders",
-  complete_reminder: "completed a reminder",
-  delete_reminder: "deleted a reminder",
-};
-
-/** Mutable snapshot of the things async speech callbacks need, without stale closures. */
 type Latest = {
   turns: Turn[];
   handsFree: boolean;
@@ -31,9 +21,63 @@ type Latest = {
   startListening: () => void;
 };
 
+const PROMPTS = [
+  "What's on my calendar tomorrow?",
+  "Any unread email this week?",
+  "Book a dentist appointment Friday at 3.",
+  "Remind me to call mum tonight.",
+];
+
+function TranscriptList({
+  turns,
+  listRef,
+  fadeTop = false,
+}: {
+  turns: Turn[];
+  listRef: React.RefObject<HTMLDivElement | null>;
+  /** Softens the top edge where the list runs under other content. */
+  fadeTop?: boolean;
+}) {
+  return (
+    <div
+      ref={listRef}
+      className={`min-h-0 flex-1 space-y-4 overflow-y-auto pb-4 pr-1 ${
+        fadeTop ? "[mask-image:linear-gradient(to_bottom,transparent,black_40px)]" : "pt-4"
+      }`}
+    >
+      {turns.length === 0 && (
+        <div className="space-y-2.5 pt-8">
+          <p className="text-xs uppercase tracking-wider text-slate-500">Try saying</p>
+          {PROMPTS.map((prompt) => (
+            <p key={prompt} className="text-sm text-slate-400">
+              &ldquo;{prompt}&rdquo;
+            </p>
+          ))}
+        </div>
+      )}
+
+      {turns.map((turn, i) => (
+        <div key={i} className="space-y-2">
+          {turn.role === "user" ? (
+            <div className="flex justify-end">
+              <p className="max-w-[85%] rounded-2xl rounded-br-sm bg-indigo-500/90 px-3.5 py-2 text-sm text-white">
+                {turn.content}
+              </p>
+            </div>
+          ) : (
+            <p className="max-w-[92%] text-sm leading-relaxed text-slate-200">{turn.content}</p>
+          )}
+          {turn.cards?.map((card, j) => (
+            <CardView key={j} card={card} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function VoiceAssistant() {
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [actions, setActions] = useState<Record<number, Action[]>>({});
   const [interim, setInterim] = useState("");
   const [listening, setListening] = useState(false);
   const [thinking, setThinking] = useState(false);
@@ -44,9 +88,21 @@ export default function VoiceAssistant() {
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [typed, setTyped] = useState("");
+  // "avatar" = talk to her face; "chat" = plain voice-to-text transcript.
+  const [mode, setMode] = useState<Mode>(() =>
+    typeof window !== "undefined" && window.localStorage.getItem("pa_mode") === "chat" ? "chat" : "avatar",
+  );
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  // --- audio: her voice drives the mouth, frame by frame -----------------
+  const mouthRef = useRef(0);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const meterRef = useRef<number | null>(null);
+
   const latest = useRef<Latest>({
     turns: [],
     handsFree: false,
@@ -75,32 +131,139 @@ export default function VoiceAssistant() {
   }, []);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [turns, interim, thinking]);
+    transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
+  }, [turns, thinking]);
 
-  const speak = useCallback((text: string, onDone?: () => void) => {
-    if (latest.current.muted || !window.speechSynthesis) {
-      onDone?.();
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.05;
-    const voice = window.speechSynthesis
-      .getVoices()
-      .find((v) => v.lang.startsWith("en") && /Google (UK|US) English|Samantha|Natural/i.test(v.name));
-    if (voice) utterance.voice = voice;
-    utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => {
-      setSpeaking(false);
-      onDone?.();
-    };
-    utterance.onerror = () => {
-      setSpeaking(false);
-      onDone?.();
-    };
-    window.speechSynthesis.speak(utterance);
+  const stopMeter = useCallback(() => {
+    if (meterRef.current !== null) cancelAnimationFrame(meterRef.current);
+    meterRef.current = null;
+    mouthRef.current = 0;
   }, []);
+
+  /** Reads loudness off the playing audio so the mouth matches the actual words. */
+  const startMeter = useCallback(() => {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.fftSize);
+    const tick = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      const level = Math.min(1, Math.sqrt(sum / data.length) * 4.5);
+      mouthRef.current = mouthRef.current * 0.55 + level * 0.45;
+      meterRef.current = requestAnimationFrame(tick);
+    };
+    tick();
+  }, []);
+
+  /** Browser speech synthesis has no audio graph, so approximate the mouth. */
+  const startFakeMeter = useCallback(() => {
+    const tick = () => {
+      const t = performance.now() / 1000;
+      const envelope = Math.sin(t * 3.1) * 0.3 + 0.7;
+      const syllables = Math.abs(Math.sin(t * 9.5)) * envelope;
+      mouthRef.current = mouthRef.current * 0.5 + syllables * 0.5;
+      meterRef.current = requestAnimationFrame(tick);
+    };
+    tick();
+  }, []);
+
+  const speakWithBrowser = useCallback(
+    (text: string, onDone?: () => void) => {
+      if (!window.speechSynthesis) {
+        onDone?.();
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1.02;
+      utterance.pitch = 1.05;
+      const voice = window.speechSynthesis
+        .getVoices()
+        .find((v) => v.lang.startsWith("en") && /female|zira|samantha|aria|natural|google uk english female/i.test(v.name));
+      if (voice) utterance.voice = voice;
+      utterance.onstart = () => {
+        setSpeaking(true);
+        startFakeMeter();
+      };
+      const finish = () => {
+        stopMeter();
+        setSpeaking(false);
+        onDone?.();
+      };
+      utterance.onend = finish;
+      utterance.onerror = finish;
+      window.speechSynthesis.speak(utterance);
+    },
+    [startFakeMeter, stopMeter],
+  );
+
+  const speak = useCallback(
+    async (text: string, onDone?: () => void) => {
+      if (latest.current.muted) {
+        onDone?.();
+        return;
+      }
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        // 501 = no ElevenLabs key configured; fall back to the browser voice.
+        if (res.status === 501 || !res.ok) {
+          speakWithBrowser(text, onDone);
+          return;
+        }
+
+        const buffer = await res.arrayBuffer();
+        const ctx = (audioCtxRef.current ??= new AudioContext());
+        if (ctx.state === "suspended") await ctx.resume();
+        const decoded = await ctx.decodeAudioData(buffer);
+
+        const source = ctx.createBufferSource();
+        source.buffer = decoded;
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+
+        analyserRef.current = analyser;
+        sourceRef.current = source;
+
+        source.onended = () => {
+          sourceRef.current = null;
+          stopMeter();
+          setSpeaking(false);
+          onDone?.();
+        };
+        setSpeaking(true);
+        source.start();
+        startMeter();
+      } catch {
+        speakWithBrowser(text, onDone);
+      }
+    },
+    [speakWithBrowser, startMeter, stopMeter],
+  );
+
+  const stopSpeaking = useCallback(() => {
+    window.speechSynthesis?.cancel();
+    if (sourceRef.current) {
+      sourceRef.current.onended = null;
+      try {
+        sourceRef.current.stop();
+      } catch {
+        /* already stopped */
+      }
+      sourceRef.current = null;
+    }
+    stopMeter();
+    setSpeaking(false);
+  }, [stopMeter]);
 
   const startListening = useCallback(() => {
     const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
@@ -170,21 +333,21 @@ export default function VoiceAssistant() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            messages: next,
+            messages: next.map(({ role, content }) => ({ role, content })),
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Request failed");
 
-        const withReply: Turn[] = [...next, { role: "assistant", content: data.reply }];
+        const withReply: Turn[] = [
+          ...next,
+          { role: "assistant", content: data.reply, cards: data.cards ?? [] },
+        ];
         latest.current.turns = withReply;
         setTurns(withReply);
-        if (data.actions?.length) {
-          setActions((a) => ({ ...a, [withReply.length - 1]: data.actions }));
-        }
         setThinking(false);
-        speak(data.reply, () => {
+        void speak(data.reply, () => {
           if (latest.current.handsFree) latest.current.startListening();
         });
       } catch (e) {
@@ -201,6 +364,13 @@ export default function VoiceAssistant() {
     latest.current = { turns, handsFree, muted, send: (t) => void send(t), startListening };
   }, [turns, handsFree, muted, send, startListening]);
 
+  useEffect(() => {
+    return () => {
+      if (meterRef.current !== null) cancelAnimationFrame(meterRef.current);
+      audioCtxRef.current?.close().catch(() => undefined);
+    };
+  }, []);
+
   const toggleHandsFree = () => {
     if (handsFree) {
       setHandsFree(false);
@@ -213,32 +383,99 @@ export default function VoiceAssistant() {
     }
   };
 
-  const busy = thinking || speaking;
-  const shownError = error ?? authError;
-  const statusText = thinking
-    ? "Thinking…"
+  const onMicClick = () => {
+    if (speaking) {
+      stopSpeaking();
+      return;
+    }
+    if (listening) stopListening();
+    else startListening();
+  };
+
+  const avatarState: AvatarState = thinking
+    ? "thinking"
     : speaking
-      ? "Speaking…"
+      ? "speaking"
       : listening
-        ? interim || "Listening…"
+        ? "listening"
+        : "idle";
+
+  const lastAssistant = useMemo(
+    () => [...turns].reverse().find((t) => t.role === "assistant"),
+    [turns],
+  );
+  const caption = interim || (thinking ? "" : lastAssistant?.content) || "";
+  const shownError = error ?? authError;
+
+  const statusText = thinking
+    ? "Thinking"
+    : speaking
+      ? "Speaking — tap to interrupt"
+      : listening
+        ? "Listening"
         : handsFree
-          ? "Hands-free on"
-          : "Tap to talk";
+          ? "Hands-free · she'll listen after each reply"
+          : "Tap the mic and talk";
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#0b0f17] text-slate-100">
-      <header className="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
-        <div>
-          <h1 className="text-base font-semibold tracking-tight">Ava</h1>
-          <p className="text-xs text-slate-400">Voice personal assistant</p>
+    <div className="relative flex h-dvh flex-col overflow-hidden bg-[#06080e] text-slate-100">
+      {/* ambient light behind everything */}
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="absolute left-1/2 top-[38%] h-[75vmin] w-[75vmin] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-600/25 blur-[110px]" />
+        <div className="absolute right-[8%] top-[12%] h-[40vmin] w-[40vmin] rounded-full bg-sky-500/10 blur-[90px]" />
+        <div className="absolute bottom-0 left-0 h-[35vmin] w-[45vmin] rounded-full bg-fuchsia-600/10 blur-[100px]" />
+      </div>
+
+      <header className="relative z-20 flex items-center justify-between gap-3 px-5 py-4">
+        <div className="flex items-center gap-2.5">
+          <span
+            className={`h-2 w-2 rounded-full transition-colors ${
+              listening
+                ? "bg-sky-400 shadow-[0_0_10px_2px_rgba(56,189,248,0.6)]"
+                : speaking
+                  ? "bg-indigo-400 shadow-[0_0_10px_2px_rgba(129,140,248,0.6)]"
+                  : thinking
+                    ? "bg-amber-400"
+                    : "bg-slate-600"
+            }`}
+          />
+          <div>
+            <h1 className="text-sm font-medium tracking-tight">Ava</h1>
+            <p className="text-[11px] text-slate-500">{statusText}</p>
+          </div>
         </div>
+
         <div className="flex items-center gap-2">
+          <div className="flex rounded-full border border-white/10 bg-white/[0.03] p-0.5 text-xs backdrop-blur">
+            {(["avatar", "chat"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  setMode(m);
+                  try {
+                    window.localStorage.setItem("pa_mode", m);
+                  } catch {
+                    /* private mode */
+                  }
+                }}
+                aria-pressed={mode === m}
+                className={`rounded-full px-3 py-1 transition ${
+                  mode === m ? "bg-white/15 text-white" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {m === "avatar" ? "Avatar" : "Chat"}
+              </button>
+            ))}
+          </div>
           <button
-            onClick={() => setMuted((m) => !m)}
-            className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-white/5"
+            onClick={() => {
+              if (!muted) stopSpeaking();
+              setMuted((m) => !m);
+            }}
+            className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-300 backdrop-blur transition hover:bg-white/10"
             aria-pressed={muted}
           >
-            {muted ? "Voice off" : "Voice on"}
+            {muted ? "Muted" : "Voice on"}
           </button>
           {session?.googleConnected ? (
             <button
@@ -246,10 +483,10 @@ export default function VoiceAssistant() {
                 await fetch("/api/auth/logout", { method: "POST" });
                 setSession({ ...session, googleConnected: false, email: null });
               }}
-              className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 transition hover:bg-emerald-400/20"
+              className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 backdrop-blur transition hover:bg-emerald-400/20"
               title={session.email ?? undefined}
             >
-              Google connected
+              Google
             </button>
           ) : (
             <a
@@ -262,134 +499,145 @@ export default function VoiceAssistant() {
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-5 py-6">
-        {turns.length === 0 && (
-          <div className="mx-auto max-w-md space-y-3 pt-10 text-center">
-            <p className="text-sm text-slate-400">Try saying</p>
-            <ul className="space-y-2 text-sm text-slate-300">
-              <li>&ldquo;What&rsquo;s on my calendar tomorrow?&rdquo;</li>
-              <li>&ldquo;Any unread email from this week?&rdquo;</li>
-              <li>&ldquo;Book a dentist appointment Friday at 3pm.&rdquo;</li>
-              <li>&ldquo;Remind me to call mum tonight.&rdquo;</li>
-            </ul>
-          </div>
-        )}
+      {mode === "avatar" ? (
+        <main className="relative z-10 grid min-h-0 flex-1 gap-4 px-5 lg:grid-cols-[1fr_min(38%,420px)]">
+          {/* --- her --- */}
+          <section className="relative min-h-0">
+            <div className="absolute inset-0">
+              <Avatar mouthRef={mouthRef} state={avatarState} />
+            </div>
 
-        {turns.map((turn, i) => (
-          <div key={i} className={turn.role === "user" ? "flex justify-end" : "flex justify-start"}>
-            <div className="max-w-[85%] space-y-1.5">
-              <div
-                className={
-                  turn.role === "user"
-                    ? "rounded-2xl rounded-br-sm bg-indigo-500 px-4 py-2.5 text-sm text-white"
-                    : "rounded-2xl rounded-bl-sm bg-white/5 px-4 py-2.5 text-sm text-slate-100"
-                }
-              >
-                {turn.content}
-              </div>
-              {actions[i]?.length ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {actions[i].map((action, j) => (
+            {/* what she just said, over the bottom of the stage */}
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col items-center gap-3 pb-2">
+              {caption && (
+                <p
+                  className={`max-w-xl text-balance text-center text-[15px] leading-relaxed drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)] transition ${
+                    interim ? "italic text-sky-200/80" : "text-slate-100"
+                  }`}
+                >
+                  {caption}
+                </p>
+              )}
+              {thinking && (
+                <div className="flex gap-1.5">
+                  {[0, 150, 300].map((d) => (
                     <span
-                      key={j}
-                      className={`rounded-full px-2 py-0.5 text-[11px] ${
-                        action.ok ? "bg-emerald-400/10 text-emerald-300" : "bg-rose-400/10 text-rose-300"
-                      }`}
-                    >
-                      {TOOL_LABELS[action.tool] ?? action.tool}
-                      {action.ok ? "" : " (failed)"}
-                    </span>
+                      key={d}
+                      className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
+                      style={{ animationDelay: `${d}ms` }}
+                    />
                   ))}
                 </div>
-              ) : null}
+              )}
+              {/* on small screens the cards live under the caption */}
+              {!!lastAssistant?.cards?.length && (
+                <div className="pointer-events-auto w-full max-w-md space-y-2 lg:hidden">
+                  {lastAssistant.cards.slice(0, 2).map((card, i) => (
+                    <CardView key={i} card={card} />
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          </section>
 
-        {interim && (
-          <div className="flex justify-end">
-            <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-indigo-400/30 px-4 py-2.5 text-sm text-indigo-200/70">
-              {interim}
-            </div>
-          </div>
-        )}
-
-        {thinking && (
-          <div className="flex justify-start">
-            <div className="flex gap-1 rounded-2xl rounded-bl-sm bg-white/5 px-4 py-3">
-              {[0, 150, 300].map((delay) => (
+          {/* --- conversation --- */}
+          <aside className="hidden min-h-0 flex-col lg:flex">
+            <TranscriptList turns={turns} listRef={transcriptRef} fadeTop />
+          </aside>
+        </main>
+      ) : (
+        <main className="relative z-10 mx-auto flex w-full min-h-0 max-w-2xl flex-1 flex-col px-5">
+          <TranscriptList turns={turns} listRef={transcriptRef} />
+          {interim && (
+            <p className="pb-2 text-right text-sm italic text-sky-200/70">{interim}</p>
+          )}
+          {thinking && (
+            <div className="flex gap-1.5 pb-2">
+              {[0, 150, 300].map((d) => (
                 <span
-                  key={delay}
+                  key={d}
                   className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
-                  style={{ animationDelay: `${delay}ms` }}
+                  style={{ animationDelay: `${d}ms` }}
                 />
               ))}
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </main>
+      )}
 
       {shownError && (
-        <p className="mx-5 mb-3 rounded-lg border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">
+        <p className="relative z-20 mx-5 mb-2 rounded-xl border border-rose-400/25 bg-rose-400/10 px-3 py-2 text-xs text-rose-200 backdrop-blur">
           {shownError}
         </p>
       )}
-
       {!supported && (
-        <p className="mx-5 mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-          Speech recognition needs Chrome or Edge. You can still type below.
+        <p className="relative z-20 mx-5 mb-2 rounded-xl border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-xs text-amber-200 backdrop-blur">
+          Speech recognition needs Chrome or Edge — you can still type below.
         </p>
       )}
 
-      <footer className="space-y-4 border-t border-white/10 px-5 pb-8 pt-6">
-        <div className="flex flex-col items-center gap-3">
-          <button
-            onClick={listening ? stopListening : startListening}
-            disabled={busy}
-            aria-label={listening ? "Stop listening" : "Start listening"}
-            className={`relative flex h-20 w-20 items-center justify-center rounded-full transition disabled:opacity-40 ${
-              listening ? "bg-rose-500" : "bg-indigo-500 hover:bg-indigo-400"
-            }`}
-          >
-            {listening && <span className="absolute inset-0 animate-ping rounded-full bg-rose-500/40" />}
-            <svg viewBox="0 0 24 24" className="relative h-8 w-8 fill-white" aria-hidden>
-              <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
-              <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
-            </svg>
-          </button>
-          <p className="h-5 text-center text-xs text-slate-400">{statusText}</p>
+      <footer className="relative z-20 flex flex-col items-center gap-3 px-5 pb-6 pt-2">
+        <div className="flex items-center gap-4">
           <button
             onClick={toggleHandsFree}
-            className={`rounded-full border px-3 py-1 text-xs transition ${
+            className={`rounded-full border px-3 py-1.5 text-xs transition ${
               handsFree
                 ? "border-indigo-400/40 bg-indigo-400/15 text-indigo-200"
                 : "border-white/10 text-slate-400 hover:bg-white/5"
             }`}
           >
-            Hands-free {handsFree ? "on" : "off"}
+            Hands-free
           </button>
+
+          <button
+            onClick={onMicClick}
+            aria-label={listening ? "Stop listening" : "Start listening"}
+            disabled={thinking}
+            className={`relative flex h-16 w-16 items-center justify-center rounded-full transition disabled:opacity-40 ${
+              listening
+                ? "bg-rose-500 shadow-[0_0_36px_rgba(244,63,94,0.45)]"
+                : speaking
+                  ? "bg-slate-700"
+                  : "bg-indigo-500 shadow-[0_0_36px_rgba(99,102,241,0.45)] hover:bg-indigo-400"
+            }`}
+          >
+            {listening && <span className="absolute inset-0 animate-ping rounded-full bg-rose-500/40" />}
+            {speaking ? (
+              <svg viewBox="0 0 24 24" className="relative h-6 w-6 fill-white" aria-hidden>
+                <rect x="6" y="5" width="4" height="14" rx="1" />
+                <rect x="14" y="5" width="4" height="14" rx="1" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
+                <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
+                <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
+              </svg>
+            )}
+          </button>
+
+          <div className="w-[86px]" />
         </div>
 
         <form
           onSubmit={(e) => {
             e.preventDefault();
             const text = typed.trim();
-            if (!text || busy) return;
+            if (!text || thinking) return;
             setTyped("");
             void send(text);
           }}
-          className="flex gap-2"
+          className="flex w-full max-w-md gap-2"
         >
           <input
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
             placeholder="…or type instead"
-            className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm outline-none placeholder:text-slate-500 focus:border-indigo-400/50"
+            className="flex-1 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none backdrop-blur placeholder:text-slate-600 focus:border-indigo-400/50"
           />
           <button
             type="submit"
-            disabled={busy || !typed.trim()}
-            className="rounded-full bg-white/10 px-4 py-2 text-sm transition hover:bg-white/20 disabled:opacity-40"
+            disabled={thinking || !typed.trim()}
+            className="rounded-full bg-white/10 px-4 py-2 text-sm backdrop-blur transition hover:bg-white/20 disabled:opacity-40"
           >
             Send
           </button>

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { GoogleClient } from "@/lib/google";
 import { readSession, sessionCookie } from "@/lib/session";
 import { runTool, tools, type ToolContext } from "@/lib/tools";
+import { toCards, type Card } from "@/lib/cards";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -62,6 +63,7 @@ export async function POST(request: Request) {
   const client = new Anthropic();
   const messages: Anthropic.MessageParam[] = history.map((m) => ({ role: m.role, content: m.content }));
   const actions: Action[] = [];
+  const cards: Card[] = [];
 
   let reply = "";
 
@@ -91,6 +93,7 @@ export async function POST(request: Request) {
           try {
             const output = await runTool(block.name, block.input, ctx);
             actions.push({ tool: block.name, input: block.input, ok: true });
+            cards.push(...toCards(block.name, output));
             return { type: "tool_result" as const, tool_use_id: block.id, content: output };
           } catch (e) {
             actions.push({ tool: block.name, input: block.input, ok: false });
@@ -119,6 +122,7 @@ export async function POST(request: Request) {
   const payload = NextResponse.json({
     reply: reply || "Sorry, I did not catch that. Could you say it again?",
     actions,
+    cards,
   });
 
   // The Google access token may have been refreshed mid-request — persist it.

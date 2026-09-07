@@ -1,10 +1,5 @@
-import { Suspense } from "react";
-import VoiceAssistant from "@/components/VoiceAssistant";
+import AssistantShell from "@/components/AssistantShell";
 
 export default function Home() {
-  return (
-    <Suspense fallback={<div className="min-h-dvh bg-[#0b0f17]" />}>
-      <VoiceAssistant />
-    </Suspense>
-  );
+  return <AssistantShell />;
 }
