@@ -13,13 +13,13 @@ export default function FaceStage({ videoRef, audioRef, status }: Props) {
 
   return (
     <div className="relative flex h-full w-full items-center justify-center">
-      <div className="relative aspect-square h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]">
+      <div className="relative aspect-[2/3] h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]">
         {/* The still portrait holds the frame until the live face takes over. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/face.png"
           alt=""
-          className={`absolute inset-0 h-full w-full object-contain transition-opacity duration-700 ${
+          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-700 ${
             live ? "opacity-0" : "opacity-100"
           }`}
         />
@@ -28,7 +28,7 @@ export default function FaceStage({ videoRef, audioRef, status }: Props) {
           ref={videoRef}
           autoPlay
           playsInline
-          className={`absolute inset-0 h-full w-full object-contain transition-opacity duration-700 ${
+          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-700 ${
             live ? "opacity-100" : "opacity-0"
           }`}
         />
