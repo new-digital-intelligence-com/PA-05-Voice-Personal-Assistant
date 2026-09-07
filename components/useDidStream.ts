@@ -53,6 +53,11 @@ export function useDidStream(onSpeechEnd?: () => void) {
   const turnOpenRef = useRef(false);
   const timersRef = useRef<number[]>([]);
 
+  // Stream trouble is transient and self-healing (a reconnect, a retry), so it belongs
+  // in the console, not in front of the user. Only an upload failure — something they
+  // just did on purpose — is worth surfacing.
+  const report = (message: string) => console.warn("[D-ID]", message);
+
   const [status, setStatus] = useState<FaceStatus>("idle");
   const [face, setFace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -121,7 +126,6 @@ export function useDidStream(onSpeechEnd?: () => void) {
 
     const run = (async () => {
       setStatus("connecting");
-      setError(null);
 
       // A stream abandoned by an earlier tab keeps its session for a short while.
       // Rather than fail outright, wait for one to free up.
@@ -143,7 +147,6 @@ export function useDidStream(onSpeechEnd?: () => void) {
           await new Promise((r) => setTimeout(r, 4000));
         }
       }
-      setError(null);
       const { id, sessionId, offer, iceServers } = created;
 
       const pc = new RTCPeerConnection({ iceServers });
@@ -199,13 +202,8 @@ export function useDidStream(onSpeechEnd?: () => void) {
       await run;
     } catch (e) {
       teardown();
-      const message = e instanceof Error ? e.message : "Could not start the video stream";
       setStatus("error");
-      setError(
-        /max user sessions/i.test(message)
-          ? "Too many open video sessions — an earlier one is still closing. Try again in a moment."
-          : message,
-      );
+      report(e instanceof Error ? e.message : "Could not start the video stream");
       throw e;
     } finally {
       connectingRef.current = null;
@@ -248,7 +246,7 @@ export function useDidStream(onSpeechEnd?: () => void) {
           }
           queueRef.current.shift();
           setStatus("error");
-          setError(message);
+          report(message);
           continue;
         }
 
