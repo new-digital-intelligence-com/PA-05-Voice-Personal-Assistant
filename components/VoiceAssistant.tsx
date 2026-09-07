@@ -610,9 +610,11 @@ export default function VoiceAssistant() {
 
           {mode === "face" && (
             <div className="pointer-events-none flex flex-col items-center gap-2 pb-1">
+              {/* Wide screens read the conversation in the panel beside her, so the
+                  caption would only repeat it. Narrow screens have no panel. */}
               {caption && (
                 <p
-                  className={`max-w-xl text-balance text-center text-[15px] leading-relaxed drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)] ${
+                  className={`max-w-xl text-balance text-center text-[15px] leading-relaxed drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)] lg:hidden ${
                     interim ? "italic text-sky-200/80" : "text-slate-100"
                   }`}
                 >
