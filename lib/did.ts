@@ -12,6 +12,12 @@ const FACE_FILE = path.join(process.cwd(), "data", "did-face.json");
 const DEFAULT_FACE = path.join(process.cwd(), "public", "face.png");
 /** A copy of whatever portrait was uploaded, kept so the browser can display it. */
 const UPLOAD_FILE = path.join(process.cwd(), "data", "face-source");
+/**
+ * The stream we opened last. A reloaded or crashed tab cannot close its own stream,
+ * and D-ID keeps counting it against the account's concurrent-session limit — so the
+ * server remembers it on disk and closes it before opening the next one.
+ */
+const LIVE_FILE = path.join(process.cwd(), "data", "did-stream.json");
 
 type FaceRecord = { url: string; mime?: string; at?: string; defaultFingerprint?: string };
 
@@ -160,7 +166,31 @@ export type StreamSession = {
   ice_servers: RTCIceServer[];
 };
 
+async function rememberStream(id: string, sessionId: string) {
+  await fs.mkdir(path.dirname(LIVE_FILE), { recursive: true });
+  await fs.writeFile(LIVE_FILE, JSON.stringify({ id, sessionId }));
+}
+
+async function forgetStream() {
+  await fs.rm(LIVE_FILE, { force: true }).catch(() => undefined);
+}
+
+/** Closes whatever stream we opened last, so its session slot is free. */
+export async function releasePreviousStream() {
+  let previous: { id?: string; sessionId?: string } | null = null;
+  try {
+    previous = JSON.parse(await fs.readFile(LIVE_FILE, "utf8"));
+  } catch {
+    return;
+  }
+  await forgetStream();
+  if (!previous?.id || !previous.sessionId) return;
+  await closeStream(previous.id, previous.sessionId).catch(() => undefined);
+}
+
 export async function createStream(sourceUrl: string): Promise<StreamSession> {
+  await releasePreviousStream();
+
   // Streams default to a small, soft render — noticeably blurrier than the still
   // portrait beside it — so ask for a taller output and a warmed first frame.
   // Several of these settings are plan-gated ("user has no permission for ..."), and a
@@ -180,10 +210,12 @@ export async function createStream(sourceUrl: string): Promise<StreamSession> {
   let lastError: unknown;
   for (const extras of attempts) {
     try {
-      return await didFetch<StreamSession>(
+      const session = await didFetch<StreamSession>(
         "/talks/streams",
         json({ source_url: sourceUrl, ...extras }),
       );
+      await rememberStream(session.id, session.session_id);
+      return session;
     } catch (e) {
       lastError = e;
       const message = e instanceof Error ? e.message : "";
@@ -224,6 +256,7 @@ export async function speak(id: string, sessionId: string, text: string) {
 }
 
 export async function closeStream(id: string, sessionId: string) {
+  await forgetStream();
   return didFetch(`/talks/streams/${id}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },

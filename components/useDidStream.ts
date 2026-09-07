@@ -13,6 +13,8 @@ export type FaceStatus =
 
 /** How many utterances D-ID will hold for one stream before rejecting the next. */
 const MAX_PENDING = 2;
+/** Close an unused stream after this long, so it stops holding a session slot. */
+const IDLE_MS = 60_000;
 
 type Api = { action: string; [k: string]: unknown };
 
@@ -105,6 +107,14 @@ export function useDidStream(onSpeechEnd?: () => void) {
     if (open) void didApi({ action: "close", ...open }).catch(() => undefined);
   }, [clearTimers]);
 
+  // An idle stream still holds one of the account's session slots, so hand it back
+  // once the conversation has gone quiet. Any change of state restarts the clock.
+  useEffect(() => {
+    if (status !== "live") return;
+    const timer = window.setTimeout(teardown, IDLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [status, teardown]);
+
   const connect = useCallback(async () => {
     if (streamRef.current && pcRef.current?.connectionState === "connected") return;
     if (connectingRef.current) return connectingRef.current;
@@ -127,9 +137,10 @@ export function useDidStream(onSpeechEnd?: () => void) {
           break;
         } catch (e) {
           const message = e instanceof Error ? e.message : "";
-          if (!/max user sessions/i.test(message) || attempt >= 5) throw e;
-          setError("Waiting for an earlier video session to close…");
-          await new Promise((r) => setTimeout(r, 8000));
+          if (!/max user sessions/i.test(message) || attempt >= 3) throw e;
+          // The server closes the stream it opened last before making a new one, so
+          // this is now rare — usually a stream from another device still expiring.
+          await new Promise((r) => setTimeout(r, 4000));
         }
       }
       setError(null);
@@ -256,6 +267,7 @@ export function useDidStream(onSpeechEnd?: () => void) {
     }
     settle();
   }, [connect, settle, utteranceFinished]);
+
 
   useEffect(() => {
     pumpRef.current = () => void pump();

@@ -23,10 +23,10 @@ type Latest = {
 /** Her opening words go out as soon as this much text exists, mid-sentence if need be. */
 const FIRST_UTTERANCE = 18;
 /**
- * After she is already talking, prefer longer runs of whole sentences: each utterance
- * is a separate render at D-ID, and fewer, larger ones mean fewer seams in her speech.
+ * Everything after the opening goes out as a single utterance. Each one is a separate
+ * render at D-ID with an audible gap between them, so more than two makes her sound
+ * like she is reading a phrase, stopping, and starting again.
  */
-const MIN_UTTERANCE = 90;
 
 const PROMPTS = [
   "What's on my calendar tomorrow?",
@@ -298,29 +298,6 @@ export default function VoiceAssistant() {
 
   /* --------------------------------------------------------------- turns */
 
-  /**
-   * Splits a growing reply on sentence boundaries so each finished sentence can be
-   * spoken while the next one is still being written.
-   */
-  const takeSentences = (buffer: string, atEnd: boolean): [string[], string] => {
-    const out: string[] = [];
-    let rest = buffer;
-    const boundary = /[.!?…]["')\]]?\s+|\n+/;
-    for (;;) {
-      const match = boundary.exec(rest);
-      if (!match) break;
-      const cut = match.index + match[0].length;
-      const sentence = rest.slice(0, cut).trim();
-      if (sentence) out.push(sentence);
-      rest = rest.slice(cut);
-    }
-    if (atEnd && rest.trim()) {
-      out.push(rest.trim());
-      rest = "";
-    }
-    return [out, rest];
-  };
-
   const send = useCallback(
     async (text: string) => {
       const next: Turn[] = [...latest.current.turns, { role: "user", content: text }];
@@ -334,9 +311,6 @@ export default function VoiceAssistant() {
 
       let spoken = "";
       let buffer = "";
-      // Each utterance is a separate render request, so avoid firing off "Hello!" on
-      // its own — group finished sentences until there is a worthwhile chunk.
-      let chunk = "";
       let full = "";
       let cards: Card[] = [];
 
@@ -383,27 +357,15 @@ export default function VoiceAssistant() {
               full += event.delta;
               buffer += event.delta;
               paint();
-              if (face) {
-                const [sentences, rest] = takeSentences(buffer, false);
-                buffer = rest;
-                for (const sentence of sentences) {
-                  chunk = chunk ? `${chunk} ${sentence}` : sentence;
-                }
-
-                // Nothing said yet: cut at the latest word boundary rather than wait
-                // for a full stop, so she opens her mouth about a second sooner.
-                if (!spoken && !chunk && buffer.length >= FIRST_UTTERANCE) {
-                  const cut = buffer.lastIndexOf(" ");
-                  if (cut >= FIRST_UTTERANCE - 4) {
-                    chunk = buffer.slice(0, cut).trim();
-                    buffer = buffer.slice(cut);
-                  }
-                }
-
-                if (chunk && (!spoken || chunk.length >= MIN_UTTERANCE)) {
-                  spoken += chunk;
-                  void did.speak(chunk);
-                  chunk = "";
+              // Only the opening words are sent early, cut at a word boundary so she
+              // starts talking about a second sooner. The rest follows as one piece.
+              if (face && !spoken && buffer.length >= FIRST_UTTERANCE) {
+                const cut = buffer.lastIndexOf(" ");
+                if (cut >= FIRST_UTTERANCE - 4) {
+                  const opening = buffer.slice(0, cut).trim();
+                  buffer = buffer.slice(cut);
+                  spoken += opening;
+                  void did.speak(opening);
                 }
               }
             } else if (event.type === "cards") {
@@ -422,14 +384,11 @@ export default function VoiceAssistant() {
         setThinking(false);
 
         if (face) {
-          // Anything left after the last sentence boundary.
-          const [tail] = takeSentences(buffer, true);
-          for (const sentence of tail) {
-            chunk = chunk ? `${chunk} ${sentence}` : sentence;
-          }
-          if (chunk.trim()) {
-            spoken += chunk;
-            void did.speak(chunk);
+          // The whole remainder in one go, so it plays as continuous speech.
+          const rest = buffer.trim();
+          if (rest) {
+            spoken += rest;
+            void did.speak(rest);
           }
           if (!spoken.trim() && full.trim()) void did.speak(full);
           did.endTurn();
