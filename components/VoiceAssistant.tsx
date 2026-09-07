@@ -28,6 +28,12 @@ const FIRST_UTTERANCE = 18;
  * like she is reading a phrase, stopping, and starting again.
  */
 
+/**
+ * The whole interface is drawn at this scale — the same thing browser zoom does, so
+ * she and the text come out comfortably large without hand-tuning every size.
+ */
+const UI_ZOOM = Number(process.env.NEXT_PUBLIC_UI_ZOOM ?? 1.75) || 1;
+
 const PROMPTS = [
   "What's on my calendar tomorrow?",
   "Any unread email this week?",
@@ -480,7 +486,10 @@ export default function VoiceAssistant() {
             : "Tap the mic and talk";
 
   return (
-    <div className="relative flex h-dvh flex-col overflow-hidden bg-[#06080e] text-slate-100">
+    <div
+      className="relative flex h-[calc(100dvh/var(--ui-zoom))] flex-col overflow-hidden bg-[#06080e] text-slate-100"
+      style={{ zoom: UI_ZOOM, ["--ui-zoom" as string]: UI_ZOOM }}
+    >
       <div aria-hidden className="pointer-events-none absolute inset-0">
         <div className="absolute left-1/2 top-[38%] h-[75vmin] w-[75vmin] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-600/20 blur-[110px]" />
         <div className="absolute right-[8%] top-[12%] h-[40vmin] w-[40vmin] rounded-full bg-sky-500/10 blur-[90px]" />
