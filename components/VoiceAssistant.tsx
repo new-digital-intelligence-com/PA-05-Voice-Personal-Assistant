@@ -1,15 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
-import type { AvatarState } from "./Avatar";
-import type { Card } from "@/lib/cards";
+import FaceStage from "./FaceStage";
 import CardView from "./Cards";
+import { useDidStream } from "./useDidStream";
+import type { Card } from "@/lib/cards";
 
-const Avatar = dynamic(() => import("./Avatar"), { ssr: false });
-
-type Mode = "avatar" | "chat";
+type Mode = "face" | "chat";
 type Turn = { role: "user" | "assistant"; content: string; cards?: Card[] };
 type SessionInfo = { googleConnected: boolean; email: string | null; anthropicConfigured: boolean };
 
@@ -17,6 +15,7 @@ type Latest = {
   turns: Turn[];
   handsFree: boolean;
   muted: boolean;
+  mode: Mode;
   send: (text: string) => void;
   startListening: () => void;
 };
@@ -81,35 +80,38 @@ export default function VoiceAssistant() {
   const [interim, setInterim] = useState("");
   const [listening, setListening] = useState(false);
   const [thinking, setThinking] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
+  const [chatSpeaking, setChatSpeaking] = useState(false);
   const [muted, setMuted] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
   const [supported, setSupported] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [typed, setTyped] = useState("");
-  // "avatar" = talk to her face; "chat" = plain voice-to-text transcript.
   const [mode, setMode] = useState<Mode>(() =>
-    typeof window !== "undefined" && window.localStorage.getItem("pa_mode") === "chat" ? "chat" : "avatar",
+    typeof window !== "undefined" && window.localStorage.getItem("pa_mode") === "chat"
+      ? "chat"
+      : "face",
   );
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
-
-  // --- audio: her voice drives the mouth, frame by frame -----------------
-  const mouthRef = useRef(0);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const meterRef = useRef<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const latest = useRef<Latest>({
     turns: [],
     handsFree: false,
     muted: false,
+    mode: "face",
     send: () => undefined,
     startListening: () => undefined,
   });
+
+  /** After she finishes a reply, re-open the mic if hands-free is on. */
+  const onSpeechEnd = useCallback(() => {
+    if (latest.current.handsFree) latest.current.startListening();
+  }, []);
+
+  const did = useDidStream(onSpeechEnd);
 
   const searchParams = useSearchParams();
   const googleStatus = searchParams.get("google");
@@ -134,77 +136,35 @@ export default function VoiceAssistant() {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
   }, [turns, thinking]);
 
-  const stopMeter = useCallback(() => {
-    if (meterRef.current !== null) cancelAnimationFrame(meterRef.current);
-    meterRef.current = null;
-    mouthRef.current = 0;
-  }, []);
+  /* ----------------------------------------------- chat-mode voice output */
 
-  /** Reads loudness off the playing audio so the mouth matches the actual words. */
-  const startMeter = useCallback(() => {
-    const analyser = analyserRef.current;
-    if (!analyser) return;
-    const data = new Uint8Array(analyser.fftSize);
-    const tick = () => {
-      analyser.getByteTimeDomainData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i++) {
-        const v = (data[i] - 128) / 128;
-        sum += v * v;
-      }
-      const level = Math.min(1, Math.sqrt(sum / data.length) * 4.5);
-      mouthRef.current = mouthRef.current * 0.55 + level * 0.45;
-      meterRef.current = requestAnimationFrame(tick);
+  const speakWithBrowser = useCallback((text: string, onDone: () => void) => {
+    if (!window.speechSynthesis) {
+      onDone();
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.02;
+    utterance.pitch = 1.05;
+    const voice = window.speechSynthesis
+      .getVoices()
+      .find((v) => v.lang.startsWith("en") && /female|zira|samantha|aria|natural/i.test(v.name));
+    if (voice) utterance.voice = voice;
+    utterance.onstart = () => setChatSpeaking(true);
+    const finish = () => {
+      setChatSpeaking(false);
+      onDone();
     };
-    tick();
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.speak(utterance);
   }, []);
 
-  /** Browser speech synthesis has no audio graph, so approximate the mouth. */
-  const startFakeMeter = useCallback(() => {
-    const tick = () => {
-      const t = performance.now() / 1000;
-      const envelope = Math.sin(t * 3.1) * 0.3 + 0.7;
-      const syllables = Math.abs(Math.sin(t * 9.5)) * envelope;
-      mouthRef.current = mouthRef.current * 0.5 + syllables * 0.5;
-      meterRef.current = requestAnimationFrame(tick);
-    };
-    tick();
-  }, []);
-
-  const speakWithBrowser = useCallback(
-    (text: string, onDone?: () => void) => {
-      if (!window.speechSynthesis) {
-        onDone?.();
-        return;
-      }
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.02;
-      utterance.pitch = 1.05;
-      const voice = window.speechSynthesis
-        .getVoices()
-        .find((v) => v.lang.startsWith("en") && /female|zira|samantha|aria|natural|google uk english female/i.test(v.name));
-      if (voice) utterance.voice = voice;
-      utterance.onstart = () => {
-        setSpeaking(true);
-        startFakeMeter();
-      };
-      const finish = () => {
-        stopMeter();
-        setSpeaking(false);
-        onDone?.();
-      };
-      utterance.onend = finish;
-      utterance.onerror = finish;
-      window.speechSynthesis.speak(utterance);
-    },
-    [startFakeMeter, stopMeter],
-  );
-
-  const speak = useCallback(
-    async (text: string, onDone?: () => void) => {
+  const speakInChat = useCallback(
+    async (text: string, onDone: () => void) => {
       if (latest.current.muted) {
-        onDone?.();
+        onDone();
         return;
       }
       try {
@@ -218,52 +178,36 @@ export default function VoiceAssistant() {
           speakWithBrowser(text, onDone);
           return;
         }
-
-        const buffer = await res.arrayBuffer();
-        const ctx = (audioCtxRef.current ??= new AudioContext());
-        if (ctx.state === "suspended") await ctx.resume();
-        const decoded = await ctx.decodeAudioData(buffer);
-
-        const source = ctx.createBufferSource();
-        source.buffer = decoded;
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 1024;
-        source.connect(analyser);
-        analyser.connect(ctx.destination);
-
-        analyserRef.current = analyser;
-        sourceRef.current = source;
-
-        source.onended = () => {
-          sourceRef.current = null;
-          stopMeter();
-          setSpeaking(false);
-          onDone?.();
+        const url = URL.createObjectURL(await res.blob());
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        const finish = () => {
+          URL.revokeObjectURL(url);
+          audioRef.current = null;
+          setChatSpeaking(false);
+          onDone();
         };
-        setSpeaking(true);
-        source.start();
-        startMeter();
+        audio.onended = finish;
+        audio.onerror = finish;
+        setChatSpeaking(true);
+        await audio.play();
       } catch {
         speakWithBrowser(text, onDone);
       }
     },
-    [speakWithBrowser, startMeter, stopMeter],
+    [speakWithBrowser],
   );
 
   const stopSpeaking = useCallback(() => {
     window.speechSynthesis?.cancel();
-    if (sourceRef.current) {
-      sourceRef.current.onended = null;
-      try {
-        sourceRef.current.stop();
-      } catch {
-        /* already stopped */
-      }
-      sourceRef.current = null;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
     }
-    stopMeter();
-    setSpeaking(false);
-  }, [stopMeter]);
+    setChatSpeaking(false);
+  }, []);
+
+  /* -------------------------------------------------------- speech input */
 
   const startListening = useCallback(() => {
     const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
@@ -320,6 +264,8 @@ export default function VoiceAssistant() {
     recognitionRef.current?.stop();
   }, []);
 
+  /* --------------------------------------------------------------- turns */
+
   const send = useCallback(
     async (text: string) => {
       const next: Turn[] = [...latest.current.turns, { role: "user", content: text }];
@@ -347,9 +293,13 @@ export default function VoiceAssistant() {
         latest.current.turns = withReply;
         setTurns(withReply);
         setThinking(false);
-        void speak(data.reply, () => {
-          if (latest.current.handsFree) latest.current.startListening();
-        });
+
+        if (latest.current.mode === "face" && !latest.current.muted) {
+          // She says it herself, in video.
+          void did.speak(data.reply);
+        } else {
+          void speakInChat(data.reply, onSpeechEnd);
+        }
       } catch (e) {
         setThinking(false);
         setError(e instanceof Error ? e.message : "Something went wrong");
@@ -357,19 +307,24 @@ export default function VoiceAssistant() {
         latest.current.handsFree = false;
       }
     },
-    [speak],
+    [did, speakInChat, onSpeechEnd],
   );
 
   useEffect(() => {
-    latest.current = { turns, handsFree, muted, send: (t) => void send(t), startListening };
-  }, [turns, handsFree, muted, send, startListening]);
-
-  useEffect(() => {
-    return () => {
-      if (meterRef.current !== null) cancelAnimationFrame(meterRef.current);
-      audioCtxRef.current?.close().catch(() => undefined);
+    latest.current = {
+      turns,
+      handsFree,
+      muted,
+      mode,
+      send: (t) => void send(t),
+      startListening,
     };
-  }, []);
+  }, [turns, handsFree, muted, mode, send, startListening]);
+
+  /* ----------------------------------------------------------------- ui */
+
+  const speaking = mode === "face" ? did.status === "speaking" : chatSpeaking;
+  const busy = thinking || speaking;
 
   const toggleHandsFree = () => {
     if (handsFree) {
@@ -385,20 +340,24 @@ export default function VoiceAssistant() {
 
   const onMicClick = () => {
     if (speaking) {
-      stopSpeaking();
+      if (mode === "chat") stopSpeaking();
       return;
     }
     if (listening) stopListening();
     else startListening();
   };
 
-  const avatarState: AvatarState = thinking
-    ? "thinking"
-    : speaking
-      ? "speaking"
-      : listening
-        ? "listening"
-        : "idle";
+  const changeMode = (next: Mode) => {
+    setMode(next);
+    latest.current.mode = next;
+    stopSpeaking();
+    if (next === "chat") did.disconnect();
+    try {
+      window.localStorage.setItem("pa_mode", next);
+    } catch {
+      /* private mode */
+    }
+  };
 
   const lastAssistant = useMemo(
     () => [...turns].reverse().find((t) => t.role === "assistant"),
@@ -410,18 +369,19 @@ export default function VoiceAssistant() {
   const statusText = thinking
     ? "Thinking"
     : speaking
-      ? "Speaking — tap to interrupt"
+      ? "Speaking"
       : listening
         ? "Listening"
-        : handsFree
-          ? "Hands-free · she'll listen after each reply"
-          : "Tap the mic and talk";
+        : did.status === "connecting" && mode === "face"
+          ? "Connecting"
+          : handsFree
+            ? "Hands-free · she listens after each reply"
+            : "Tap the mic and talk";
 
   return (
     <div className="relative flex h-dvh flex-col overflow-hidden bg-[#06080e] text-slate-100">
-      {/* ambient light behind everything */}
       <div aria-hidden className="pointer-events-none absolute inset-0">
-        <div className="absolute left-1/2 top-[38%] h-[75vmin] w-[75vmin] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-600/25 blur-[110px]" />
+        <div className="absolute left-1/2 top-[38%] h-[75vmin] w-[75vmin] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-600/20 blur-[110px]" />
         <div className="absolute right-[8%] top-[12%] h-[40vmin] w-[40vmin] rounded-full bg-sky-500/10 blur-[90px]" />
         <div className="absolute bottom-0 left-0 h-[35vmin] w-[45vmin] rounded-full bg-fuchsia-600/10 blur-[100px]" />
       </div>
@@ -447,23 +407,16 @@ export default function VoiceAssistant() {
 
         <div className="flex items-center gap-2">
           <div className="flex rounded-full border border-white/10 bg-white/[0.03] p-0.5 text-xs backdrop-blur">
-            {(["avatar", "chat"] as const).map((m) => (
+            {(["face", "chat"] as const).map((m) => (
               <button
                 key={m}
-                onClick={() => {
-                  setMode(m);
-                  try {
-                    window.localStorage.setItem("pa_mode", m);
-                  } catch {
-                    /* private mode */
-                  }
-                }}
+                onClick={() => changeMode(m)}
                 aria-pressed={mode === m}
                 className={`rounded-full px-3 py-1 transition ${
                   mode === m ? "bg-white/15 text-white" : "text-slate-400 hover:text-slate-200"
                 }`}
               >
-                {m === "avatar" ? "Avatar" : "Chat"}
+                {m === "face" ? "Face" : "Chat"}
               </button>
             ))}
           </div>
@@ -499,19 +452,33 @@ export default function VoiceAssistant() {
         </div>
       </header>
 
-      {mode === "avatar" ? (
-        <main className="relative z-10 grid min-h-0 flex-1 gap-4 px-5 lg:grid-cols-[1fr_min(38%,420px)]">
-          {/* --- her --- */}
-          <section className="relative min-h-0">
-            <div className="absolute inset-0">
-              <Avatar mouthRef={mouthRef} state={avatarState} />
+      <main
+        className={`relative z-10 min-h-0 flex-1 gap-4 px-5 ${
+          mode === "face"
+            ? "grid lg:grid-cols-[1fr_min(38%,420px)]"
+            : "mx-auto flex w-full max-w-2xl flex-col"
+        }`}
+      >
+        <section className="relative flex min-h-0 flex-col">
+          {mode === "face" ? (
+            <div className="min-h-0 flex-1 pb-2">
+              <FaceStage
+                videoRef={did.videoRef}
+                status={did.status}
+                face={did.face}
+                error={did.error}
+                onUpload={did.uploadFace}
+              />
             </div>
+          ) : (
+            <TranscriptList turns={turns} listRef={transcriptRef} />
+          )}
 
-            {/* what she just said, over the bottom of the stage */}
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col items-center gap-3 pb-2">
+          {mode === "face" && (
+            <div className="pointer-events-none flex flex-col items-center gap-2 pb-1">
               {caption && (
                 <p
-                  className={`max-w-xl text-balance text-center text-[15px] leading-relaxed drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)] transition ${
+                  className={`max-w-xl text-balance text-center text-[15px] leading-relaxed drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)] ${
                     interim ? "italic text-sky-200/80" : "text-slate-100"
                   }`}
                 >
@@ -529,7 +496,6 @@ export default function VoiceAssistant() {
                   ))}
                 </div>
               )}
-              {/* on small screens the cards live under the caption */}
               {!!lastAssistant?.cards?.length && (
                 <div className="pointer-events-auto w-full max-w-md space-y-2 lg:hidden">
                   {lastAssistant.cards.slice(0, 2).map((card, i) => (
@@ -538,32 +504,15 @@ export default function VoiceAssistant() {
                 </div>
               )}
             </div>
-          </section>
+          )}
+        </section>
 
-          {/* --- conversation --- */}
+        {mode === "face" && (
           <aside className="hidden min-h-0 flex-col lg:flex">
             <TranscriptList turns={turns} listRef={transcriptRef} fadeTop />
           </aside>
-        </main>
-      ) : (
-        <main className="relative z-10 mx-auto flex w-full min-h-0 max-w-2xl flex-1 flex-col px-5">
-          <TranscriptList turns={turns} listRef={transcriptRef} />
-          {interim && (
-            <p className="pb-2 text-right text-sm italic text-sky-200/70">{interim}</p>
-          )}
-          {thinking && (
-            <div className="flex gap-1.5 pb-2">
-              {[0, 150, 300].map((d) => (
-                <span
-                  key={d}
-                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
-                  style={{ animationDelay: `${d}ms` }}
-                />
-              ))}
-            </div>
-          )}
-        </main>
-      )}
+        )}
+      </main>
 
       {shownError && (
         <p className="relative z-20 mx-5 mb-2 rounded-xl border border-rose-400/25 bg-rose-400/10 px-3 py-2 text-xs text-rose-200 backdrop-blur">
@@ -592,27 +541,18 @@ export default function VoiceAssistant() {
           <button
             onClick={onMicClick}
             aria-label={listening ? "Stop listening" : "Start listening"}
-            disabled={thinking}
+            disabled={thinking || (speaking && mode === "face")}
             className={`relative flex h-16 w-16 items-center justify-center rounded-full transition disabled:opacity-40 ${
               listening
                 ? "bg-rose-500 shadow-[0_0_36px_rgba(244,63,94,0.45)]"
-                : speaking
-                  ? "bg-slate-700"
-                  : "bg-indigo-500 shadow-[0_0_36px_rgba(99,102,241,0.45)] hover:bg-indigo-400"
+                : "bg-indigo-500 shadow-[0_0_36px_rgba(99,102,241,0.45)] hover:bg-indigo-400"
             }`}
           >
             {listening && <span className="absolute inset-0 animate-ping rounded-full bg-rose-500/40" />}
-            {speaking ? (
-              <svg viewBox="0 0 24 24" className="relative h-6 w-6 fill-white" aria-hidden>
-                <rect x="6" y="5" width="4" height="14" rx="1" />
-                <rect x="14" y="5" width="4" height="14" rx="1" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
-                <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
-                <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
-              </svg>
-            )}
+            <svg viewBox="0 0 24 24" className="relative h-7 w-7 fill-white" aria-hidden>
+              <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z" />
+              <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-3.08A7 7 0 0 0 19 11Z" />
+            </svg>
           </button>
 
           <div className="w-[86px]" />
@@ -622,7 +562,7 @@ export default function VoiceAssistant() {
           onSubmit={(e) => {
             e.preventDefault();
             const text = typed.trim();
-            if (!text || thinking) return;
+            if (!text || busy) return;
             setTyped("");
             void send(text);
           }}
@@ -636,7 +576,7 @@ export default function VoiceAssistant() {
           />
           <button
             type="submit"
-            disabled={thinking || !typed.trim()}
+            disabled={busy || !typed.trim()}
             className="rounded-full bg-white/10 px-4 py-2 text-sm backdrop-blur transition hover:bg-white/20 disabled:opacity-40"
           >
             Send

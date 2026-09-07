@@ -3,17 +3,16 @@
 Hands-free assistant that takes natural voice requests, handles tasks, reminders and
 questions, reads answers back aloud, and works against your Google Calendar and Gmail.
 
-She has a face: a 3D head that idles, blinks, follows your cursor and lip-syncs to her
-own voice. A toggle in the header switches between **Avatar** and plain **Chat**.
+She has a face: a **photoreal person** streamed as live video, lip-synced to what she
+says. A toggle in the header switches between **Face** and plain **Chat**.
 
 - **Brain:** Claude Haiku 4.5 (`claude-haiku-4-5`) via the Anthropic Messages API, in a
   server-side tool-use loop.
 - **Ears:** the browser's Web Speech API — speech recognition never leaves the device.
-- **Voice:** ElevenLabs when `ELEVENLABS_API_KEY` is set, otherwise the browser's own
-  speech synthesis. Either way the audio drives her mouth.
-- **Face:** three.js / react-three-fiber over a GLB with ARKit blendshapes. An audio
-  analyser reads loudness every frame and drives `jawOpen` plus wandering vowel shapes,
-  while her head and neck bones turn toward your cursor and her chest breathes.
+- **Face + voice (Face mode):** [D-ID](https://d-id.com) Talks Streams. A still portrait
+  plus her reply text becomes a WebRTC video stream of a real-looking person speaking.
+- **Voice (Chat mode):** ElevenLabs when `ELEVENLABS_API_KEY` is set, otherwise the
+  browser's own speech synthesis.
 - **Hands:** Google Calendar + Gmail REST APIs, called with the signed-in user's OAuth
   token, plus a small local reminders store.
 - **Answers:** spoken as short prose, and shown as cards — calendar rows, inbox rows,
@@ -39,26 +38,24 @@ own voice. A toggle in the header switches between **Avatar** and plain **Chat**
 
 3. **Enable the APIs** in the same project: Gmail API and Google Calendar API.
 
-4. **Her voice (optional).** Put an [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
-   key in `ELEVENLABS_API_KEY` for a natural female voice. Without it the app silently
-   falls back to the browser voice — nothing breaks, it just sounds robotic.
-   `ELEVENLABS_VOICE_ID` defaults to Rachel; swap it for any voice id from the library.
-
-5. **Her face (optional).** She ships as `public/avatar.glb` — a Ready Player Me
-   character (borrowed from the public
-   [r3f-virtual-girlfriend](https://github.com/wass08/r3f-virtual-girlfriend-frontend)
-   demo) with 67 blendshapes. To make her your own, build an avatar free at
-   [readyplayer.me](https://readyplayer.me) and put its URL in
-   `NEXT_PUBLIC_AVATAR_URL`, keeping the ARKit morph targets — they are what the
-   lip-sync drives:
+4. **Her face** — get an API key at [studio.d-id.com](https://studio.d-id.com) (Account →
+   API Key) and set it:
 
    ```
-   NEXT_PUBLIC_AVATAR_URL=https://models.readyplayer.me/<id>.glb?morphTargets=ARKit&textureAtlas=1024
+   DID_API_KEY=...
    ```
 
-   Any GLB with ARKit blendshapes works. It is measured on load: the model is scaled
-   to a fixed height and, if it has a skeleton, the camera frames a head-and-shoulders
-   portrait off the `Head` and `HeadTop_End` bones. A head-only GLB is framed whole.
+   Without it, Face mode shows a note and Chat mode still works normally.
+
+   The portrait she wears ships at `public/face.png` and is uploaded to D-ID the first
+   time she is needed. To change her, click **Change face** in the app and pick another
+   photo — front-facing, one face, eyes open, cropped close to the head. It must be your
+   own photo, someone who agreed, or an AI-generated face.
+
+5. **Chat-mode voice (optional).** An [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
+   key in `ELEVENLABS_API_KEY` gives a natural voice in Chat mode. Without it the app
+   falls back to the browser voice — nothing breaks, it just sounds robotic. The key only
+   needs **Text to Speech** access.
 
 6. Run it:
 
@@ -72,17 +69,15 @@ own voice. A toggle in the header switches between **Avatar** and plain **Chat**
 
 ## Using it
 
-- **Avatar / Chat** — the header toggle. Avatar puts her on screen; Chat is a plain
+- **Face / Chat** — the header toggle. Face streams her as video; Chat is a plain
   voice-to-text transcript. The choice is remembered.
-- **Tap to talk** — one utterance, then Ava answers aloud. Tap again while she is
-  speaking to interrupt her.
-- **Hands-free** — Ava re-opens the mic after every reply, so you can keep talking while
-  driving or cooking. Tap again to stop.
-- **Voice on/off** — mutes the spoken reply without muting the mic.
-- Every action Ava took appears as a chip under her reply ("read your calendar", "sent an
-  email"), so nothing happens invisibly.
+- **Tap to talk** — one utterance, then she answers aloud.
+- **Hands-free** — the mic re-opens after every reply, so you can keep talking while
+  driving or cooking. Tap it again to stop.
+- **Voice on/off** — mutes her reply without muting the mic.
+- Answers appear as cards beside her, so nothing important is spoken-only.
 
-What it handles today:
+What she handles today:
 
 | Ask | What happens |
 | --- | --- |
@@ -101,27 +96,30 @@ What it handles today:
 app/
   page.tsx                       Renders the assistant
   api/chat/route.ts              Claude Haiku tool-use loop (max 8 iterations)
-  api/tts/route.ts               ElevenLabs proxy (keeps the key server-side; 501 = fall back)
-  api/auth/google/route.ts       Starts the OAuth consent flow
-  api/auth/google/callback/      Exchanges the code, stores tokens in the session cookie
+  api/did/route.ts               D-ID stream lifecycle: create, sdp, ice, talk, close
+  api/did/face/route.ts          Portrait upload; caches the D-ID image URL
+  api/tts/route.ts               ElevenLabs proxy for Chat mode (501 = fall back)
+  api/auth/google/…              OAuth start + callback; tokens go in the session cookie
   api/session/route.ts           Connection status for the UI
 lib/
   tools.ts                       Tool schemas + executors (Calendar, Gmail, reminders)
   google.ts                      OAuth URLs, token exchange/refresh, authorised fetch
+  did.ts                         D-ID REST client; the API key never leaves the server
   session.ts                     AES-256-GCM encrypted, httpOnly session cookie
-  reminders.ts                   JSON-file reminder store (data/reminders.json)
   cards.ts                       Turns tool output into structured cards for the UI
+  reminders.ts                   JSON-file reminder store (data/reminders.json)
 components/
-  VoiceAssistant.tsx             Mic, transcript, audio pipeline, hands-free loop
-  Avatar.tsx                     3D head: blendshape lip-sync, blinking, idle motion
+  VoiceAssistant.tsx             Mic, transcript, mode switching, hands-free loop
+  useDidStream.ts                WebRTC peer connection and speak/idle state
+  FaceStage.tsx                  Video stage, portrait fallback, face upload
   Cards.tsx                      Calendar / inbox / reminder / confirmation cards
-public/
-  avatar.glb                     Her model (67 ARKit + viseme blendshapes)
+public/face.png                  The portrait she wears by default
 ```
 
 The chat route is stateless: the browser keeps the plain-text conversation and posts the
 last 20 turns with each request. Tool calls run entirely server-side within one request,
-so the Google access token never reaches the browser.
+so the Google access token never reaches the browser. The D-ID stream is opened on her
+first reply and reused, since an open stream is what costs credits.
 
 ### Safety rails
 
@@ -130,15 +128,16 @@ so the Google access token never reaches the browser.
   yes in a *previous* turn before calling them.
 - `create_email_draft` is the offered fallback whenever the user hesitates.
 - Google tokens live only in an encrypted `httpOnly` cookie keyed by `SESSION_SECRET`.
+- The D-ID and ElevenLabs keys stay server-side; the browser only ever sees SDP, ICE
+  candidates and a video track.
 
 ## Notes
 
-- `data/reminders.json` is local to the machine and gitignored. Swap `lib/reminders.ts`
-  for a real database when deploying for more than one user.
+- `data/` holds local state (reminders, the cached D-ID portrait URL) and is gitignored.
+  Swap `lib/reminders.ts` for a real database when deploying for more than one user.
 - Deploying: set `APP_URL` and `GOOGLE_REDIRECT_URI` to the production origin, and add
   that callback URL in Google Cloud Console as well.
-- Cost: Haiku 4.5 is $1 / $5 per million input / output tokens — a typical exchange with
-  one or two tool calls is a fraction of a cent. ElevenLabs bills separately per
-  character; the free tier covers roughly 10k characters a month.
-- The 3D head needs WebGL. If a machine cannot provide it, switch to Chat mode — every
-  feature works there too.
+- Costs: Haiku 4.5 is $1 / $5 per million input / output tokens — a typical exchange is a
+  fraction of a cent. D-ID bills per minute of streamed video and is the expensive part;
+  Chat mode costs nothing beyond the model.
+- Face mode needs WebRTC. If a network blocks it, Chat mode still works everywhere.
