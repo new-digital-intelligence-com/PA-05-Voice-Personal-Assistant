@@ -11,6 +11,9 @@ export type FaceStatus =
   | "speaking"
   | "error";
 
+/** How many utterances D-ID will hold for one stream before rejecting the next. */
+const MAX_PENDING = 2;
+
 type Api = { action: string; [k: string]: unknown };
 
 async function didApi<T = Record<string, unknown>>(payload: Api): Promise<T> {
@@ -40,7 +43,11 @@ export function useDidStream(onSpeechEnd?: () => void) {
   const connectingRef = useRef<Promise<void> | null>(null);
   const endCallbackRef = useRef(onSpeechEnd);
 
-  const pendingRef = useRef(0);
+  // D-ID accepts only a couple of un-rendered utterances per stream, so queue them
+  // here: one plays while the next renders, and nothing is dropped.
+  const queueRef = useRef<string[]>([]);
+  const inFlightRef = useRef(0);
+  const pumpingRef = useRef(false);
   const turnOpenRef = useRef(false);
   const timersRef = useRef<number[]>([]);
 
@@ -69,20 +76,25 @@ export function useDidStream(onSpeechEnd?: () => void) {
 
   /** The turn is done only when nothing is queued and no more sentences are coming. */
   const settle = useCallback(() => {
-    if (pendingRef.current > 0 || turnOpenRef.current) return;
+    if (inFlightRef.current > 0 || queueRef.current.length > 0 || turnOpenRef.current) return;
     clearTimers();
     setStatus((s) => (s === "speaking" ? "live" : s));
     endCallbackRef.current?.();
   }, [clearTimers]);
 
+  const pumpRef = useRef<() => void>(() => undefined);
+
   const utteranceFinished = useCallback(() => {
-    pendingRef.current = Math.max(0, pendingRef.current - 1);
+    inFlightRef.current = Math.max(0, inFlightRef.current - 1);
+    pumpRef.current();
     settle();
   }, [settle]);
 
   const teardown = useCallback(() => {
     clearTimers();
-    pendingRef.current = 0;
+    queueRef.current = [];
+    inFlightRef.current = 0;
+    pumpingRef.current = false;
     turnOpenRef.current = false;
     channelRef.current?.close();
     channelRef.current = null;
@@ -184,31 +196,58 @@ export function useDidStream(onSpeechEnd?: () => void) {
     settle();
   }, [settle]);
 
-  const speak = useCallback(
-    async (text: string) => {
-      if (!text.trim()) return;
-      try {
-        pendingRef.current += 1;
+  /** Sends queued lines while D-ID has room for them. */
+  const pump = useCallback(async () => {
+    if (pumpingRef.current) return;
+    pumpingRef.current = true;
+    try {
+      while (inFlightRef.current < MAX_PENDING && queueRef.current.length > 0) {
+        const text = queueRef.current[0];
+        try {
+          await connect();
+          const open = streamRef.current;
+          if (!open) throw new Error("Stream is not open");
+          await didApi({ action: "talk", ...open, text });
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "She could not speak";
+          if (/pending requests limit/i.test(message)) {
+            // Her queue upstream is full; try this same line again shortly.
+            timersRef.current.push(window.setTimeout(() => void pumpRef.current(), 600));
+            return;
+          }
+          queueRef.current.shift();
+          setStatus("error");
+          setError(message);
+          continue;
+        }
+
+        queueRef.current.shift();
+        inFlightRef.current += 1;
         setStatus("speaking");
-        await connect();
-        const open = streamRef.current;
-        if (!open) throw new Error("Stream is not open");
-        await didApi({ action: "talk", ...open, text });
 
         // Safety net: if a done-event never arrives, release on an estimate of how long
         // the line takes to say (~14 characters a second) plus slack.
         timersRef.current.push(
           window.setTimeout(utteranceFinished, (text.length / 14) * 1000 + 8000),
         );
-      } catch (e) {
-        pendingRef.current = Math.max(0, pendingRef.current - 1);
-        setStatus("error");
-        setError(e instanceof Error ? e.message : "She could not speak");
-        turnOpenRef.current = false;
-        endCallbackRef.current?.();
       }
+    } finally {
+      pumpingRef.current = false;
+    }
+    settle();
+  }, [connect, settle, utteranceFinished]);
+
+  useEffect(() => {
+    pumpRef.current = () => void pump();
+  }, [pump]);
+
+  const speak = useCallback(
+    async (text: string) => {
+      if (!text.trim()) return;
+      queueRef.current.push(text.trim());
+      await pump();
     },
-    [connect, utteranceFinished],
+    [pump],
   );
 
   const uploadFace = useCallback(

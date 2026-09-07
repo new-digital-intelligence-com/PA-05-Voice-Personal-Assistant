@@ -24,8 +24,11 @@ type Latest = {
 const SILENCE_MS = 800;
 /** Her opening words go out as soon as this much text exists, mid-sentence if need be. */
 const FIRST_UTTERANCE = 18;
-/** After she is already talking, prefer whole sentences of at least this length. */
-const MIN_UTTERANCE = 45;
+/**
+ * After she is already talking, prefer longer runs of whole sentences: each utterance
+ * is a separate render at D-ID, and fewer, larger ones mean fewer seams in her speech.
+ */
+const MIN_UTTERANCE = 90;
 
 const PROMPTS = [
   "What's on my calendar tomorrow?",
