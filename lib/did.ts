@@ -161,7 +161,18 @@ export type StreamSession = {
 };
 
 export async function createStream(sourceUrl: string): Promise<StreamSession> {
-  return didFetch<StreamSession>("/talks/streams", json({ source_url: sourceUrl }));
+  // Streams default to a small, soft render — noticeably blurrier than the still
+  // portrait beside it. Ask for a taller output, and warm the stream so the first
+  // frame is ready before she is asked to say anything.
+  const resolution = Number(process.env.DID_OUTPUT_RESOLUTION ?? 1080);
+  return didFetch<StreamSession>(
+    "/talks/streams",
+    json({
+      source_url: sourceUrl,
+      output_resolution: resolution,
+      stream_warmup: true,
+    }),
+  );
 }
 
 export async function sendAnswer(id: string, sessionId: string, answer: RTCSessionDescriptionInit) {

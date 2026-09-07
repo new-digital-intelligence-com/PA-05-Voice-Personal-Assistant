@@ -173,8 +173,13 @@ export function useDidStream(onSpeechEnd?: () => void) {
       await run;
     } catch (e) {
       teardown();
+      const message = e instanceof Error ? e.message : "Could not start the video stream";
       setStatus("error");
-      setError(e instanceof Error ? e.message : "Could not start the video stream");
+      setError(
+        /max user sessions/i.test(message)
+          ? "Too many open video sessions — an earlier one is still closing. Try again in a moment."
+          : message,
+      );
       throw e;
     } finally {
       connectingRef.current = null;
@@ -269,6 +274,22 @@ export function useDidStream(onSpeechEnd?: () => void) {
     },
     [teardown],
   );
+
+  // A reload or closed tab would otherwise leave the stream open on D-ID's side and
+  // burn through the account's concurrent-session limit.
+  useEffect(() => {
+    const release = () => {
+      const open = streamRef.current;
+      if (!open) return;
+      streamRef.current = null;
+      navigator.sendBeacon?.(
+        "/api/did",
+        new Blob([JSON.stringify({ action: "close", ...open })], { type: "application/json" }),
+      );
+    };
+    window.addEventListener("pagehide", release);
+    return () => window.removeEventListener("pagehide", release);
+  }, []);
 
   useEffect(() => teardown, [teardown]);
 
