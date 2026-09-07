@@ -34,6 +34,29 @@ function faceId() {
   return face;
 }
 
+/**
+ * A freshly created avatar spends a while in Simli's queue, and using it early fails
+ * with INVALID_FACE_ID — so ask before connecting, and tell the user what is going on.
+ */
+export async function faceStatus(): Promise<"ready" | "processing" | "unknown"> {
+  const key = process.env.SIMLI_API_KEY;
+  const face = process.env.SIMLI_FACE_ID;
+  if (!key || !face) return "unknown";
+  try {
+    const res = await fetch(`${BASE}/getRequestStatus`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-simli-api-key": key },
+      body: JSON.stringify({ character_uid: face }),
+    });
+    if (!res.ok) return "unknown";
+    const { status } = (await res.json()) as { status?: string };
+    if (status === "processing" || status === "queued") return "processing";
+    return status ? "ready" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export type SimliSession = {
   sessionToken: string;
   iceServers: RTCIceServer[];
@@ -57,7 +80,10 @@ export async function createSession(): Promise<SimliSession> {
   });
   const tokenText = await tokenRes.text();
   if (!tokenRes.ok) {
-    throw new SimliError(`Simli: ${tokenText.slice(0, 300)}`, tokenRes.status);
+    const friendly = /INVALID_FACE_ID/.test(tokenText)
+      ? "Simli does not recognise that face ID yet — a newly created avatar is unusable until it finishes generating."
+      : `Simli: ${tokenText.slice(0, 300)}`;
+    throw new SimliError(friendly, tokenRes.status);
   }
   const { session_token } = JSON.parse(tokenText) as { session_token: string };
   if (!session_token || session_token === "FAIL TOKEN") {

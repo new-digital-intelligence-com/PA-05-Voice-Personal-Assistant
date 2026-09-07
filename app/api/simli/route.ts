@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
-import { SimliError, createSession, isConfigured } from "@/lib/simli";
+import { SimliError, createSession, faceStatus, isConfigured } from "@/lib/simli";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function GET() {
+  const configured = isConfigured();
   return NextResponse.json({
-    configured: isConfigured(),
+    configured,
     hasKey: Boolean(process.env.SIMLI_API_KEY),
     hasFace: Boolean(process.env.SIMLI_FACE_ID),
+    faceProcessing: configured ? (await faceStatus()) === "processing" : false,
   });
 }
 

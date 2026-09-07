@@ -8,6 +8,7 @@ import { LogLevel, SimliClient } from "simli-client/dist/client";
 
 export type FaceStatus =
   | "unconfigured" // no Simli key or face id on the server
+  | "face-pending" // avatar accepted but still generating at Simli
   | "idle" // ready to connect
   | "connecting"
   | "live" // stream up, she is watching
@@ -50,8 +51,9 @@ export function useSimliStream(onSpeechEnd?: () => void) {
     fetch("/api/simli")
       .then((r) => r.json())
       .then((d) => {
-        setConfigured(Boolean(d.configured));
-        setStatus(d.configured ? "idle" : "unconfigured");
+        const ready = Boolean(d.configured) && !d.faceProcessing;
+        setConfigured(ready);
+        setStatus(!d.configured ? "unconfigured" : d.faceProcessing ? "face-pending" : "idle");
       })
       .catch(() => undefined);
   }, []);

@@ -34,6 +34,16 @@ export default function FaceStage({ videoRef, audioRef, status }: Props) {
         />
         <audio ref={audioRef} autoPlay />
 
+        {status === "face-pending" && (
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-1 bg-gradient-to-t from-black/85 to-transparent px-6 pb-5 pt-12 text-center">
+            <p className="text-sm text-slate-100">She is still being brought to life</p>
+            <p className="max-w-sm text-xs leading-relaxed text-slate-400">
+              Simli is generating her avatar from your photo. It usually takes a while;
+              reload this page once it is done and she will start speaking.
+            </p>
+          </div>
+        )}
+
         {status === "unconfigured" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60 p-8 text-center backdrop-blur-sm">
             <p className="text-sm text-slate-200">Her face is not set up yet</p>
