@@ -1,0 +1,94 @@
+SIMLI AVATAR — CREATE AND CHECK
+===============================
+
+Never paste the API key into this file: it is committed to the repo.
+Load it from .env.local instead.
+
+  # Linux / macOS
+  export SIMLI_API_KEY=$(grep '^SIMLI_API_KEY=' .env.local | cut -d= -f2-)
+
+  # Windows PowerShell
+  $env:SIMLI_API_KEY = (Select-String '^SIMLI_API_KEY=' .env.local).Line.Split('=',2)[1]
+
+
+1. PREPARE THE PHOTO
+--------------------
+Simli only accepts SQUARE images. Give it a square yourself, or it crops the
+middle and can cut off the top of the head.
+
+To keep the whole photo, pad it to square instead of cropping (blurred copy of
+itself behind, so there are no black bars):
+
+  python3 - <<'PY'
+  from PIL import Image, ImageFilter
+  src = Image.open("public/face.png").convert("RGB")
+  w, h = src.size
+  side = max(w, h)
+  bg = src.resize((side, side), Image.LANCZOS).filter(ImageFilter.GaussianBlur(40))
+  bg.paste(src, ((side - w) // 2, (side - h) // 2))
+  bg.save("/tmp/face-square.png")
+  print("saved", bg.size)
+  PY
+
+The face should be front-facing, eyes open, one person, and must be your own
+photo, someone who agreed, or an AI-generated face.
+
+
+2. CREATE THE AVATAR
+--------------------
+  curl -s -X POST "https://api.simli.ai/generateFaceID?face_name=NDI%20Assistant" \
+    -H "x-simli-api-key: $SIMLI_API_KEY" \
+    -F "image=@/tmp/face-square.png;type=image/png"
+
+Returns:
+  {"message":"Face generation request added to queue...",
+   "character_uid":"<THIS IS THE FACE ID>","warnings":[]}
+
+A non-empty "warnings" usually means the image was not square and Simli cropped
+it — redo step 1 if so.
+
+
+3. CHECK WHETHER IT IS READY
+----------------------------
+  curl -s -X POST https://api.simli.ai/getRequestStatus \
+    -H "x-simli-api-key: $SIMLI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"character_uid":"PASTE_FACE_ID"}'
+
+  {"status":"processing", ...}   still generating — she cannot speak yet
+  anything else                  ready to use
+
+Generation is queued and can take a long while. Using the ID early fails with
+INVALID_FACE_ID; the app shows "She is still being brought to life" instead.
+
+
+4. USE IT
+---------
+Put the ID in .env.local and restart the dev server:
+
+  SIMLI_FACE_ID=<character_uid from step 2>
+
+Replace public/face.png with the same picture so the still shown before the
+stream connects matches her.
+
+
+5. HANDY EXTRAS
+---------------
+Your own avatars:
+  curl -s -H "x-simli-api-key: $SIMLI_API_KEY" https://api.simli.ai/faces
+
+Simli's stock faces (usable immediately, no waiting):
+  curl -s -H "x-simli-api-key: $SIMLI_API_KEY" https://api.simli.ai/getFaceIDs
+
+Check a voice works before wiring it up — free ElevenLabs accounts get 402 on
+Voice Library voices:
+  curl -s -o /tmp/test.pcm -w "%{http_code}\n" -X POST \
+    "https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/stream?output_format=pcm_16000" \
+    -H "xi-api-key: $ELEVENLABS_API_KEY" -H "Content-Type: application/json" \
+    -d '{"text":"test","model_id":"eleven_turbo_v2_5"}'
+
+
+CURRENT AVATARS
+---------------
+  2556384f-d584-43ca-85cb-7f0b07993a0a   square crop, in use
+  283e4bc5-dad0-41ea-8997-43313299e5de   full frame padded to square
