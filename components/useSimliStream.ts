@@ -88,13 +88,18 @@ export function useSimliStream(onSpeechEnd?: () => void) {
       const audio = audioRef.current;
       if (!video || !audio) throw new Error("Video element is not mounted yet");
 
+      // LiveKit is Simli's default transport and relays through TURN when a network
+      // blocks direct peer traffic; plain p2p times out behind stricter firewalls.
+      const transport =
+        process.env.NEXT_PUBLIC_SIMLI_TRANSPORT === "p2p" ? "p2p" : "livekit";
+
       const client = new SimliClient(
         data.sessionToken,
         video,
         audio,
         data.iceServers ?? null,
         LogLevel.ERROR,
-        "p2p",
+        transport,
       );
 
       client.on("speaking", () => setStatus("speaking"));
