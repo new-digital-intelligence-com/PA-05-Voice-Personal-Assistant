@@ -52,13 +52,6 @@ export default function FaceStage({ videoRef, status, face, error, onUpload }: P
           }`}
         />
 
-        {status === "connecting" && (
-          <div className="absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 bg-gradient-to-t from-black/80 to-transparent pb-4 pt-10 text-xs text-slate-300">
-            <span className="h-1.5 w-1.5 animate-ping rounded-full bg-indigo-400" />
-            Waking her up…
-          </div>
-        )}
-
         {status === "unconfigured" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center">
             <p className="text-sm text-slate-200">No D-ID key yet</p>

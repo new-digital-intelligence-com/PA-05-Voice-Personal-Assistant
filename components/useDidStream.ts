@@ -13,8 +13,8 @@ export type FaceStatus =
 
 /** How many utterances D-ID will hold for one stream before rejecting the next. */
 const MAX_PENDING = 2;
-/** Close an unused stream after this long, so it stops holding a session slot. */
-const IDLE_MS = 60_000;
+/** Backoff before retrying a connection that failed, so a hard failure cannot spin. */
+const RECONNECT_MS = 15_000;
 
 type Api = { action: string; [k: string]: unknown };
 
@@ -43,6 +43,7 @@ export function useDidStream(onSpeechEnd?: () => void) {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const streamRef = useRef<{ id: string; sessionId: string } | null>(null);
   const connectingRef = useRef<Promise<void> | null>(null);
+  const failuresRef = useRef(0);
   const endCallbackRef = useRef(onSpeechEnd);
 
   // D-ID accepts only a couple of un-rendered utterances per stream, so queue them
@@ -111,14 +112,6 @@ export function useDidStream(onSpeechEnd?: () => void) {
     streamRef.current = null;
     if (open) void didApi({ action: "close", ...open }).catch(() => undefined);
   }, [clearTimers]);
-
-  // An idle stream still holds one of the account's session slots, so hand it back
-  // once the conversation has gone quiet. Any change of state restarts the clock.
-  useEffect(() => {
-    if (status !== "live") return;
-    const timer = window.setTimeout(teardown, IDLE_MS);
-    return () => window.clearTimeout(timer);
-  }, [status, teardown]);
 
   const connect = useCallback(async () => {
     if (streamRef.current && pcRef.current?.connectionState === "connected") return;
@@ -195,20 +188,34 @@ export function useDidStream(onSpeechEnd?: () => void) {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await didApi({ action: "sdp", id, sessionId, answer });
+      failuresRef.current = 0;
     })();
 
     connectingRef.current = run;
     try {
       await run;
     } catch (e) {
+      failuresRef.current += 1;
       teardown();
-      setStatus("error");
+      // Back to idle so the reconnect effect can try again after a pause.
+      setStatus("idle");
       report(e instanceof Error ? e.message : "Could not start the video stream");
       throw e;
     } finally {
       connectingRef.current = null;
     }
   }, [teardown, utteranceFinished]);
+
+  // Opening a stream costs nothing — only speech is billed — so hold it open and she
+  // is always ready. Reconnect quietly whenever it drops.
+  useEffect(() => {
+    if (status !== "idle") return;
+    const delay = failuresRef.current > 0 ? RECONNECT_MS : 0;
+    const timer = window.setTimeout(() => {
+      void connect().catch(() => undefined);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [status, connect]);
 
   /** Open the stream ahead of time so the first sentence does not wait on a handshake. */
   const prewarm = useCallback(() => {
