@@ -11,15 +11,16 @@ type Props = {
 
 export default function FaceStage({ videoRef, audioRef, status }: Props) {
   const live = status === "live" || status === "speaking";
-  // Simli streams a fixed-resolution square. Stretching it past that is what makes her
-  // look soft, so the stage never grows beyond the frame's real pixels.
+  // Simli streams a fixed-resolution square. Blowing it up several times over is what
+  // made her soft; a modest ceiling keeps her large without turning to mush.
   const [nativeHeight, setNativeHeight] = useState<number | null>(null);
+  const maxHeight = nativeHeight ? Math.round(nativeHeight * 1.6) : null;
 
   return (
     <div className="relative flex h-full w-full items-center justify-center">
       <div
-        className="relative aspect-[2/3] h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]"
-        style={nativeHeight ? { maxHeight: `${nativeHeight}px` } : undefined}
+        className="relative aspect-square h-full max-h-full w-auto max-w-full overflow-hidden rounded-3xl border border-white/10 bg-black/40 shadow-[0_0_80px_rgba(79,70,229,0.18)]"
+        style={maxHeight ? { maxHeight: `${maxHeight}px` } : undefined}
       >
         {/* The still portrait holds the frame until the live face takes over. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
