@@ -12,7 +12,8 @@ own voice. A toggle in the header switches between **Avatar** and plain **Chat**
 - **Voice:** ElevenLabs when `ELEVENLABS_API_KEY` is set, otherwise the browser's own
   speech synthesis. Either way the audio drives her mouth.
 - **Face:** three.js / react-three-fiber over a GLB with ARKit blendshapes. An audio
-  analyser reads loudness every frame and feeds `jawOpen` / `mouthFunnel`.
+  analyser reads loudness every frame and drives `jawOpen` plus wandering vowel shapes,
+  while her head and neck bones turn toward your cursor and her chest breathes.
 - **Hands:** Google Calendar + Gmail REST APIs, called with the signed-in user's OAuth
   token, plus a small local reminders store.
 - **Answers:** spoken as short prose, and shown as cards — calendar rows, inbox rows,
@@ -43,9 +44,11 @@ own voice. A toggle in the header switches between **Avatar** and plain **Chat**
    falls back to the browser voice — nothing breaks, it just sounds robotic.
    `ELEVENLABS_VOICE_ID` defaults to Rachel; swap it for any voice id from the library.
 
-5. **Her face (optional).** The bundled `public/avatar.glb` is a neutral head scan that
-   works offline. For an actual woman, build one free at
-   [readyplayer.me](https://readyplayer.me) and put the GLB URL in
+5. **Her face (optional).** She ships as `public/avatar.glb` — a Ready Player Me
+   character (borrowed from the public
+   [r3f-virtual-girlfriend](https://github.com/wass08/r3f-virtual-girlfriend-frontend)
+   demo) with 67 blendshapes. To make her your own, build an avatar free at
+   [readyplayer.me](https://readyplayer.me) and put its URL in
    `NEXT_PUBLIC_AVATAR_URL`, keeping the ARKit morph targets — they are what the
    lip-sync drives:
 
@@ -53,7 +56,9 @@ own voice. A toggle in the header switches between **Avatar** and plain **Chat**
    NEXT_PUBLIC_AVATAR_URL=https://models.readyplayer.me/<id>.glb?morphTargets=ARKit&textureAtlas=1024
    ```
 
-   Any GLB with ARKit blendshapes works; it is auto-scaled and centred on load.
+   Any GLB with ARKit blendshapes works. It is measured on load: the model is scaled
+   to a fixed height and, if it has a skeleton, the camera frames a head-and-shoulders
+   portrait off the `Head` and `HeadTop_End` bones. A head-only GLB is framed whole.
 
 6. Run it:
 
@@ -111,8 +116,7 @@ components/
   Avatar.tsx                     3D head: blendshape lip-sync, blinking, idle motion
   Cards.tsx                      Calendar / inbox / reminder / confirmation cards
 public/
-  avatar.glb                     Default head (52 ARKit blendshapes)
-  basis/                         KTX2 transcoder the model's textures need
+  avatar.glb                     Her model (67 ARKit + viseme blendshapes)
 ```
 
 The chat route is stateless: the browser keeps the plain-text conversation and posts the
